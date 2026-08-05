@@ -97,6 +97,26 @@ def test_unfreeze_last_blocks_only(checkpoint_path: Path):
     assert "conv_block5.conv2.weight" not in names
 
 
+def test_unfreeze_last_two_blocks(checkpoint_path: Path):
+    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
+    model.unfreeze_last_blocks(n_blocks=2)
+
+    names = {n for n, p in model.cnn14.named_parameters() if p.requires_grad}
+    assert "conv_block6.conv1.weight" in names
+    assert "conv_block5.conv2.weight" in names
+    assert "fc1.weight" in names
+    assert "fc_audioset.weight" in names
+    assert "conv_block4.conv1.weight" not in names
+
+    groups = model.param_groups("finetune", backbone_lr=1e-5, head_lr=1e-4)
+    assert len(groups) == 2
+    backbone_names = {
+        name for name, p in model.cnn14.named_parameters()
+        if p.requires_grad and not name.startswith("fc_audioset")
+    }
+    assert "conv_block5.conv1.weight" in backbone_names
+
+
 def test_param_groups(checkpoint_path: Path):
     model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
 

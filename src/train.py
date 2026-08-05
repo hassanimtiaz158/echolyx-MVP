@@ -62,6 +62,7 @@ DEFAULTS = {
     "phase2_epochs": 15,
     "phase2_backbone_lr": 1e-5,
     "phase2_head_lr": 1e-4,
+    "phase2_unfreeze_blocks": 1,
 }
 
 

@@ -35,10 +35,14 @@ Gradio UI (label + confidence)
 ```
 
 Two-phase fine-tuning (TDD 4.3): **Phase 1** trains only the new head with a
-frozen backbone (Adam, lr=1e-3, 8 epochs); **Phase 2** unfreezes
-`conv_block6` + `fc1` with differential learning rates (backbone 1e-5, head
-1e-4, 15 epochs). Loss is class-weighted cross-entropy
-(`total / (2 * class_count)`), splits are stratified 70/15/15, seed 42.
+frozen backbone (Adam, lr=1e-3, 8 epochs); **Phase 2** unfreezes the last two
+conv blocks (`conv_block5+6`) + `fc1` with differential learning rates
+(backbone 1e-5, head 1e-4, 25 epochs) — the data-rich recipe used when the
+MIMII DUE + MIMII DG sections are pooled. Loss is class-weighted
+cross-entropy (`total / (2 * class_count)`), the train loader oversamples the
+Faulty minority (`balance_sampling: true`), and splits are stratified 70/15/15,
+seed 42. For small data, drop `phase2_unfreeze_blocks` to 1 and `phase2_epochs`
+to 15.
 
 ## Setup
 
@@ -53,33 +57,40 @@ pip install -r requirements.txt
 ### 2. Download the data
 
 **MIMII fan subset** — real labeled normal/abnormal industrial fan sounds,
-the primary source of truth for the Faulty class. Download the fan archive
-from the MIMII dataset release (Zenodo record 3384388) and unzip it so the
-folder layout matches what the pipeline expects:
+the primary source of truth for the Faulty class. Two archives are pooled:
+
+- **MIMII DUE** — fan section (release, Zenodo record 3384388): clip
+  filenames carry the label, e.g. `section_00_source_train_normal_0000.wav`
+  vs `section_00_source_test_anomaly_0000.wav`. Both train and test pools are
+  used (the DUE challenge split is ignored — a binary classifier needs fault
+  examples in training; see TDD sec 3.1).
+- **MIMII DG** (optional, recommended) — `fan.zip` (Zenodo record 6529888,
+  ~928 MB): three more fan machines (`section_00/01/02`), each with
+  source + target domains. Same filename-label convention.
+
+Unzip so the pipeline finds everything under one root (the collector recurses,
+so any layout works as long as filenames keep the `_normal_`/`_anomaly_` token):
 
 ```
 data/raw/
-├── mimii/
-│   └── fan/
-│       ├── id_00/
-│       │   ├── normal/          # .wav clips -> label 0 (Normal)
-│       │   └── abnormal/        # .wav clips -> label 1 (Faulty)
-│       ├── id_01/
-│       │   ├── normal/
-│       │   └── abnormal/
-│       └── id_02/  ... id_04/
+├── mimii/                 # both archives may sit side-by-side, e.g.:
+│   ├── fan/               #   MIMII DUE fan section
+│   │   └── section_00/...
+│   └── fan_dg/            #   MIMII DG fan.zip contents
+│       └── fan/...
 └── freesound/
-    ├── desk_fan.mp3             # any .mp3/.wav fan clips -> label 0 (Normal)
+    ├── desk_fan.mp3       # any .mp3/.wav fan clips -> label 0 (Normal)
     ├── ceiling_fan.wav
-    └── fan's frame broken.mp3   # HELD OUT — see "Sanity check" below
+    └── broken_fans/       # HELD OUT — see "Sanity check" below
 ```
 
 **Freesound fan clips** — ~40 real recordings of various fan types
 (desk, ceiling, box, exhaust, industrial, PC) collected to diversify the
-Normal class. Drop them into `data/raw/freesound/`. The single real faulty
-recording, `fan's frame broken.mp3`, is **excluded from training and
+Normal class. Drop them into `data/raw/freesound/`. Real faulty/broken
+recordings (`data/raw/broken_fans/`) are **excluded from training and
 evaluation splits automatically** (anything with "broken" in the name) and
-reserved as the held-out real-world sanity-check sample.
+reserved as the held-out real-world sanity-check set, reported separately
+and never mixed into aggregate metrics.
 
 > `data/raw/` and `data/processed/` are gitignored — the data is large and
 > licensed; never commit it.
@@ -101,7 +112,7 @@ roots at `/kaggle/input` and `/kaggle/working`).
 # 0. Audit the data — build the labeled manifest and print class counts
 python -m src.data.collect
 
-# 1. Train (two-phase fine-tuning, ~8 + ~15 epochs; GPU recommended)
+# 1. Train (two-phase fine-tuning, ~8 + ~25 epochs; GPU recommended)
 python -m src.train --config configs/config.yaml
 
 # 2. Evaluate — test-split metrics, plots, and the held-out sanity check
@@ -124,7 +135,7 @@ Smoke-test the whole pipeline on tiny data with
 | Training curves | `artifacts/training_curves.png` | Train/val loss + accuracy across both phases |
 | Confusion matrix | `artifacts/confusion_matrix.png` | Test-split confusion matrix |
 | Training history | `artifacts/training_history.json` | Per-epoch loss/accuracy for both phases |
-| Metrics | stdout of `evaluate` | Accuracy, precision, recall, F1 (Faulty = positive class; recall is the priority metric) + full `classification_report` + **REAL-WORLD SANITY CHECK** result on `fan's frame broken.mp3`, reported separately and never mixed into aggregate metrics |
+| Metrics | stdout of `evaluate` | Accuracy, precision, recall, F1 (Faulty = positive class; recall is the priority metric), predicted-label distribution, threshold-tuned metrics (max-F1 cutoff on validation, applied to test), full `classification_report` + **REAL-WORLD HOLD-OUT CHECK** on `data/raw/broken_fans/`, reported separately and never mixed into aggregate metrics |
 
 ## Tests
 

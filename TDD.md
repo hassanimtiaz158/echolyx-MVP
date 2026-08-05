@@ -84,6 +84,7 @@ Gradio UI (label + confidence)
 ### 4.3 Two-Phase Fine-Tuning
 - **Phase 1** (backbone frozen): train only the new linear head. Adam, lr=1e-3, ~8 epochs. Lets the head adapt without disturbing pretrained features.
 - **Phase 2** (partial unfreeze): unfreeze last conv block (`conv_block6`) + `fc1`. Adam with differential learning rates (backbone: 1e-5, head: 1e-4), ~15 epochs. Refines high-level features toward fan-specific acoustic patterns while preserving general audio representations in earlier layers.
+- **Data-rich variant (current config)**: once the fault pool grows to ~400 clips (MIMII DUE + MIMII DG merged), Phase 2 runs `phase2_unfreeze_blocks: 2` (conv_block5+6+fc1) for `phase2_epochs: 25`. More fault examples make deeper fine-tuning stable, and the extra epochs give the backbone time to adapt to fault signatures. Both knobs stay config-driven (`phase2_unfreeze_blocks`, `phase2_epochs`); the TDD baseline (1 block, 15 epochs) remains the default for small data.
 - Best checkpoint selected by validation accuracy, saved each time it improves.
 
 ### 4.4 Loss & Optimization
