@@ -25,3 +25,6 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
+
+# Browser partial-download artifacts
+*.crdownload
