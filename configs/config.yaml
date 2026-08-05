@@ -1,0 +1,42 @@
+# Echolyx AI — Fan Anomaly Detection MVP
+# Single Config cell (mirrors TDD sec 7). All paths are repo-root-relative;
+# on Kaggle point these at /kaggle/input and /kaggle/working.
+
+# --- Data sources (TDD sec 3.1) ---
+mimii_root: "data/raw/mimii"              # MIMII fan subset: fan/id_XX/{normal,abnormal}/*.wav
+extra_normal_root: "data/raw/freesound"   # Freesound fan clips -> all Normal (label 0)
+
+# Held-out real-world sanity-check clip (TDD sec 3.1, PRD FR7): the single
+# real faulty Freesound recording "fan's frame broken.mp3". It is EXCLUDED
+# from the training set and must never enter evaluation splits. collect.py
+# matches it by "broken" in the filename; evaluate.py uses it only as an
+# explicit post-hoc inference spot-check, never as train/test data.
+sanity_clip_filename: "fan's frame broken.mp3"
+
+# --- Preprocessing (TDD sec 3.2) ---
+sample_rate: 32000    # PANNs' expected input rate
+clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long->trim
+
+# --- Training (TDD sec 3.3, sec 7) ---
+batch_size: 16        # tune for free-tier GPU VRAM (~12-16 GB, T4)
+seed: 42              # fixed seed for reproducibility (Python/NumPy/PyTorch)
+num_workers: 0        # 0 = safe on Windows/Kaggle/Colab alike
+
+# --- Model / transfer learning (TDD sec 4) ---
+num_classes: 2
+class_names: ["Normal", "Faulty"]
+# Backbone checkpoint (Cnn14_mAP=0.431.pth). If unset, default is
+# <checkpoint_dir>/Cnn14_mAP=0.431.pth. Fetch with:
+#   python -m src.models.download_checkpoint --dest checkpoints
+backbone_checkpoint: "checkpoints/Cnn14_mAP=0.431.pth"
+
+# --- Two-phase fine-tuning (TDD sec 4.3) ---
+phase1_epochs: 8            # frozen backbone, head-only (Phase 1)
+phase1_lr: 0.001            # Adam LR for the head in Phase 1
+phase2_epochs: 15           # unfrozen conv_block6 + fc1 (Phase 2)
+phase2_backbone_lr: 0.00001 # differential LR: backbone
+phase2_head_lr: 0.0001      # differential LR: head
+
+# --- Artifacts (TDD sec 7) ---
+checkpoint_dir: "checkpoints"   # best.pt / final model (+ metadata: sample rate, clip length, class names)
+artifact_dir: "artifacts"       # training curves, confusion matrix plot, evaluation report

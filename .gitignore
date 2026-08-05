@@ -1,0 +1,27 @@
+# Data — large and/or licensed; never commit
+data/raw/
+data/processed/
+broken/
+*.zip
+
+# Checkpoints & artifacts
+checkpoints/
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
