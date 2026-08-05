@@ -38,6 +38,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import yaml
 
 from src.data.collect import collect
@@ -54,6 +55,7 @@ DEFAULTS = {
     "num_classes": 2,
     "class_names": ["Normal", "Faulty"],
     "num_workers": 0,
+    "mixup_alpha": 0.0,
     "phase1_epochs": 8,
     "phase1_lr": 1e-3,
     "phase2_epochs": 15,
@@ -90,6 +92,27 @@ def load_config(path: str | Path) -> dict:
     return cfg
 
 
+def _mixup_batch(
+    waveforms: torch.Tensor,
+    labels: torch.Tensor,
+    alpha: float,
+    num_classes: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mixup (TDD sec 3.5): interpolate pairs drawn with random permutation.
+
+    Lambdas come from ``Beta(alpha, alpha)``. Labels are one-hot mixed so the
+    loss is the expected CE over both constituents. Returns
+    ``(mixed_waveforms, mixed_labels)``.
+    """
+    batch = waveforms.size(0)
+    lam = torch.distributions.Beta(alpha, alpha).sample((batch, 1)).to(waveforms.device)
+    index = torch.randperm(batch, device=waveforms.device)
+    mixed_waveforms = lam * waveforms + (1.0 - lam) * waveforms[index]
+    one_hot = F.one_hot(labels, num_classes=num_classes).float()
+    mixed_labels = lam * one_hot + (1.0 - lam) * one_hot[index]
+    return mixed_waveforms, mixed_labels
+
+
 def _run_epoch(
     model: nn.Module,
     loader,
@@ -97,6 +120,8 @@ def _run_epoch(
     optimizer,
     device: torch.device,
     train: bool,
+    mixup_alpha: float = 0.0,
+    num_classes: int = 2,
 ) -> tuple[float, float]:
     """Run one train (if ``train``) or eval pass; returns (avg_loss, accuracy)."""
     model.train(train)
@@ -108,15 +133,27 @@ def _run_epoch(
             waveforms = waveforms.to(device)
             labels = labels.to(device)
 
+            if train and mixup_alpha > 0.0:
+                waveforms, mix_targets = _mixup_batch(
+                    waveforms, labels, mixup_alpha, num_classes
+                )
+            else:
+                mix_targets = None
+
             if train:
                 optimizer.zero_grad()
             output = model(waveforms)["logits"]
-            loss = criterion(output, labels)
+            if mix_targets is not None:
+                loss = criterion(output, mix_targets)
+            else:
+                loss = criterion(output, labels)
             if train:
                 loss.backward()
                 optimizer.step()
 
             running_loss += loss.item() * labels.size(0)
+            # For mixup batches this compares against the pre-mix labels —
+            # an approximation; val accuracy drives checkpoint selection anyway.
             correct += (output.argmax(dim=-1) == labels).sum().item()
             total += labels.size(0)
 
@@ -141,7 +178,8 @@ def train_phase(
     best_acc = best_state["val_acc"]
     for epoch in range(1, epochs + 1):
         train_loss, train_acc = _run_epoch(
-            model, train_loader, criterion, optimizer, device, train=True
+            model, train_loader, criterion, optimizer, device, train=True,
+            mixup_alpha=cfg.get("mixup_alpha", 0.0), num_classes=cfg["num_classes"],
         )
         val_loss, val_acc = _run_epoch(
             model, val_loader, criterion, optimizer, device, train=False

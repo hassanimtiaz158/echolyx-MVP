@@ -13,6 +13,12 @@ extra_normal_root: "data/raw/freesound"   # Freesound fan clips -> all Normal (l
 # explicit post-hoc inference spot-check, never as train/test data.
 sanity_clip_filename: "fan's frame broken.mp3"
 
+# Real-world broken-fan hold-out set (TDD sec 3.1): real faulty consumer-fan
+# recordings (Freesound). NEVER part of training/test splits. evaluate.py runs
+# inference on every clip here and reports a per-clip table + detection count
+# strictly outside the aggregate metrics.
+broken_fan_root: "data/raw/broken_fans"
+
 # --- Preprocessing (TDD sec 3.2) ---
 sample_rate: 32000    # PANNs' expected input rate
 clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long->trim
@@ -21,6 +27,7 @@ clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long
 batch_size: 16        # tune for free-tier GPU VRAM (~12-16 GB, T4)
 seed: 42              # fixed seed for reproducibility (Python/NumPy/PyTorch)
 num_workers: 0        # 0 = safe on Windows/Kaggle/Colab alike
+mixup_alpha: 0.2      # Beta(alpha, alpha) mixup on the train split; 0 = disabled (TDD 3.5)
 
 # --- Model / transfer learning (TDD sec 4) ---
 num_classes: 2

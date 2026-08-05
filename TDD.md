@@ -67,6 +67,7 @@ Gradio UI (label + confidence)
 ### 3.5 Augmentation (training set only)
 - Additive Gaussian noise (p=0.3)
 - Random gain scaling (p=0.3)
+- **Mixup** (`mixup_alpha: 0.2`, config-gated): interpolate waveform pairs with `Beta(alpha, alpha)` lambdas and mix their one-hot labels; the loss is the expected CE over both constituents. Targeted at the small faulty class — improves decision-boundary robustness under heavy class imbalance. Config `0` disables.
 - Rationale: light augmentation to reduce overfitting given limited real anomalous samples; avoided anything that could distort the acoustic signature of the fault itself (e.g., no pitch-shifting).
 
 ## 4. Model Design
@@ -90,9 +91,11 @@ Gradio UI (label + confidence)
 
 ## 5. Evaluation
 
-- **Metrics:** accuracy, precision, recall, F1 (binary, faulty=positive class), confusion matrix.
+- **Metrics:** accuracy, precision, recall, F1 (binary, faulty=positive class), confusion matrix, and the **predicted-label distribution** (explicit majority-class-collapse check).
 - **Priority metric:** recall on the Faulty class — in a failure-prediction product, a missed fault (false negative) is more costly than a false alarm.
+- **Threshold tuning:** the P(Faulty) cutoff maximizing **validation** F1 is selected, then the test split is re-scored at that cutoff and reported separately (fights the argmax collapse that class imbalance induces even with weighted loss).
 - **Real-world sanity check:** run inference on the one real, non-training `fan's frame broken.mp3` clip; report result explicitly and honestly (whether correct or not) as the most credible single data point for investors.
+- **Real-world hold-out set:** every clip under `broken_fan_root` (real faulty consumer-fan recordings, never in training/test splits) is scored individually and reported as a per-clip table + detection count, kept strictly separate from aggregate metrics.
 - **Training curves:** loss/accuracy plots across both phases, saved as artifacts for the pitch deck.
 
 ## 6. Inference / Serving
@@ -111,7 +114,7 @@ Gradio UI (label + confidence)
 ## 8. Known Limitations (to state explicitly, not hide)
 
 - Faulty-class data comes primarily from MIMII's specific fan units/recording conditions; may not generalize to arbitrary real-world fans or other machinery.
-- Single real "faulty" clip from Freesound is a spot-check, not a statistically meaningful validation set.
+- Real-world faulty clips from Freesound (single sanity clip + 11-clip hold-out set) are spot-checks, not a statistically meaningful validation set.
 - No fault localization/type classification (only binary Normal/Faulty).
 - No real-time/streaming capability — single fixed-length clip classification only.
 - Small compute budget (free-tier GPU) constrains model size/epochs; production accuracy would require more data, more compute, and likely a larger backbone or ensemble.
