@@ -56,6 +56,7 @@ DEFAULTS = {
     "class_names": ["Normal", "Faulty"],
     "num_workers": 0,
     "mixup_alpha": 0.0,
+    "balance_sampling": False,
     "phase1_epochs": 8,
     "phase1_lr": 1e-3,
     "phase2_epochs": 15,
@@ -284,6 +285,7 @@ def main() -> None:
         batch_size=cfg["batch_size"],
         num_workers=cfg["num_workers"],
         seed=cfg["seed"],
+        balance_train=cfg.get("balance_sampling", False),
     )
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 

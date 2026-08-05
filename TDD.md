@@ -62,12 +62,13 @@ Gradio UI (label + confidence)
 
 ### 3.4 Class Imbalance Handling
 - MIMII anomalous clips are a minority relative to normal clips (further skewed by folding in 40 extra normal Freesound clips).
-- Mitigation: **class-weighted cross-entropy loss**, weights computed as `total / (2 * class_count)` per class.
+- Mitigation 1: **class-weighted cross-entropy loss**, weights computed as `total / (2 * class_count)` per class.
+- Mitigation 2: **balanced sampling** (`balance_sampling: true`, default ON): the train loader draws with replacement using inverse-class-frequency weights so the Faulty minority is present every epoch instead of being swamped by Normal.
 
 ### 3.5 Augmentation (training set only)
 - Additive Gaussian noise (p=0.3)
 - Random gain scaling (p=0.3)
-- **Mixup** (`mixup_alpha: 0.2`, config-gated): interpolate waveform pairs with `Beta(alpha, alpha)` lambdas and mix their one-hot labels; the loss is the expected CE over both constituents. Targeted at the small faulty class — improves decision-boundary robustness under heavy class imbalance. Config `0` disables.
+- **Mixup** (`mixup_alpha`, default `0` = OFF): implemented and smoke-verified, but empirically **disabled by default** — with the 12:1 imbalance it dilutes the scarce fault signal (fault clips become normal-soft labels ~99% of the time). Re-enable once fault data is plentiful.
 - Rationale: light augmentation to reduce overfitting given limited real anomalous samples; avoided anything that could distort the acoustic signature of the fault itself (e.g., no pitch-shifting).
 
 ## 4. Model Design

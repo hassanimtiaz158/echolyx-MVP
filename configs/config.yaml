@@ -27,7 +27,13 @@ clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long
 batch_size: 16        # tune for free-tier GPU VRAM (~12-16 GB, T4)
 seed: 42              # fixed seed for reproducibility (Python/NumPy/PyTorch)
 num_workers: 0        # 0 = safe on Windows/Kaggle/Colab alike
-mixup_alpha: 0.2      # Beta(alpha, alpha) mixup on the train split; 0 = disabled (TDD 3.5)
+# mixup_alpha: 0.2    # DISABLED: with 12:1 imbalance mixup dilutes the scarce
+#                     # fault signal (fault clips are blended into normal-soft
+#                     # labels). Re-enable only once fault data is plentiful.
+mixup_alpha: 0.0
+# balance_sampling: oversample the minority (Faulty) class with replacement so
+# it is present every epoch (TDD 3.4). Default ON.
+balance_sampling: true
 
 # --- Model / transfer learning (TDD sec 4) ---
 num_classes: 2

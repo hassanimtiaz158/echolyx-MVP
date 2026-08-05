@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from src.data.preprocess import Augment, load_fixed_length_audio
 
@@ -151,11 +151,15 @@ def make_dataloaders(
     batch_size: int,
     num_workers: int = 0,
     seed: int = 42,
+    balance_train: bool = False,
 ) -> tuple[DataLoader, DataLoader, DataLoader, torch.Tensor]:
     """Build train (augmented), validation, and test DataLoaders.
 
     Returns ``(train_loader, val_loader, test_loader, class_weights)`` where
     class weights are computed from the training split only (TDD 3.4).
+    If ``balance_train``, the train loader draws with replacement using
+    inverse-class-frequency weights, so the minority (Faulty) class is seen
+    every epoch instead of being swamped by Normal (TDD 3.4).
     """
     train_split, val_split, test_split = build_splits(filepaths, labels, seed=seed)
 
@@ -169,8 +173,19 @@ def make_dataloaders(
         test_split.filepaths, test_split.labels, sample_rate, num_samples, augment=False
     )
 
+    sampler = None
+    if balance_train:
+        weights = get_class_weights(train_split.labels)
+        sample_weights = torch.tensor(
+            [weights[l].item() for l in train_split.labels], dtype=torch.double
+        )
+        sampler = WeightedRandomSampler(
+            sample_weights, num_samples=len(sample_weights), replacement=True
+        )
+
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        train_ds, batch_size=batch_size, shuffle=sampler is None,
+        sampler=sampler, num_workers=num_workers,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
