@@ -110,14 +110,20 @@ class TransferCnn14(nn.Module):
             if not name.startswith("fc_audioset"):
                 param.requires_grad = trainable
 
-    def unfreeze_last_blocks(self) -> None:
-        """Phase 2: unfreeze ``conv_block6`` + ``fc1`` only (TDD 4.3).
+    def unfreeze_last_blocks(self, n_blocks: int = 1) -> None:
+        """Phase 2: unfreeze the last ``n_blocks`` conv blocks + ``fc1``.
 
-        The head was already trainable; non-grad flags on anything downstream
-        of these layers are reset so the optimizer can update them.
+        Default (``n_blocks=1``) is the TDD 4.3 recipe: ``conv_block6`` +
+        ``fc1`` only. With substantially more fault data, ``n_blocks=2``
+        (conv_block5+6) trades a little stability for faster feature
+        adaptation toward the fault signatures.
         """
+        block_names = {
+            f"conv_block{6 - i}." for i in range(n_blocks)
+        }
+        block_names.add("fc1.")
         for name, param in self.cnn14.named_parameters():
-            if name.startswith("conv_block6.") or name.startswith("fc1."):
+            if name.startswith(tuple(sorted(block_names))):
                 param.requires_grad = True
 
     def trainable_parameter_names(self) -> list[str]:
@@ -142,9 +148,10 @@ class TransferCnn14(nn.Module):
         if mode == "head":
             return [{"params": head_params, "lr": head_lr, "name": "head"}]
         if mode == "finetune":
+            # Any currently-trainable backbone param (whatever was unfrozen).
             backbone_params = [
                 p for name, p in self.cnn14.named_parameters()
-                if p.requires_grad and name.startswith(("conv_block6.", "fc1."))
+                if p.requires_grad and not name.startswith("fc_audioset")
             ]
             return [
                 {"params": backbone_params, "lr": backbone_lr, "name": "backbone"},

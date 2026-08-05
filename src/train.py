@@ -320,7 +320,7 @@ def main() -> None:
     )
 
     # 4) Phase 2 — unfreeze last blocks, differential LR (TDD 4.3).
-    model.unfreeze_last_blocks()
+    model.unfreeze_last_blocks(n_blocks=cfg.get("phase2_unfreeze_blocks", 1))
     logger.info("Phase 2: unfreezing conv_block6 + fc1; backbone lr=%g head lr=%g",
                 cfg["phase2_backbone_lr"], cfg["phase2_head_lr"])
     opt2 = torch.optim.Adam(
