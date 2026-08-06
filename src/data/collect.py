@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -59,6 +60,23 @@ def _label_from_filename(wav_path: Path) -> int | None:
     return LABEL_NORMAL if match.group(1) == "normal" else LABEL_FAULTY
 
 
+def _walk(root: Path, suffixes: set[str]):
+    """Yield sorted files under ``root`` matching ``suffixes``.
+
+    Uses ``os.walk(followlinks=True)`` because data roots may contain
+    symlinked subdirectories (e.g. ``data/raw/mimii/fan_dg -> /kaggle/input/...``
+    on Kaggle). ``Path.rglob`` faithfully does NOT descend into symlinked
+    directories, silently dropping whole MIMII sections.
+    """
+    out: list[Path] = []
+    for dirpath, _, filenames in os.walk(root, followlinks=True):
+        for name in filenames:
+            if Path(name).suffix.lower() in suffixes:
+                out.append(Path(dirpath) / name)
+    out.sort()
+    return out
+
+
 def collect(
     mimii_root: str | Path,
     extra_normal_root: str | Path,
@@ -89,7 +107,7 @@ def collect(
     # MIMII fan subset (DUE format): recursive scan, label by filename
     # substring (_normal_ -> 0, _anomaly_ -> 1). DUE's train/test folder
     # split is re-pooled (TDD sec 3.1) - every clip is training material.
-    for wav in sorted(mimii_root.rglob("*.wav")):
+    for wav in _walk(mimii_root, {".wav"}):
         label = _label_from_filename(wav)
         if label is None:
             logger.warning(
@@ -101,9 +119,7 @@ def collect(
 
     # Freesound clips: all Normal (0) EXCEPT any name containing "broken"
     # (the held-out sanity clip) — excluded from training entirely.
-    for clip in sorted(
-        p for p in extra_normal_root.rglob("*") if p.suffix.lower() in {".mp3", ".wav"}
-    ):
+    for clip in _walk(extra_normal_root, {".mp3", ".wav"}):
         if SANITY_SUBSTRING in clip.name.lower():
             logger.info(
                 "Excluding held-out sanity clip from training: %s", clip.name
@@ -130,8 +146,8 @@ def find_sanity_clip(
     or not).
     """
     extra_normal_root = Path(extra_normal_root)
-    for clip in extra_normal_root.rglob("*"):
-        if clip.is_file() and clip.name.lower() == sanity_filename.lower():
+    for clip in _walk(extra_normal_root, {".mp3", ".wav", ".flac", ".ogg"}):
+        if clip.name.lower() == sanity_filename.lower():
             return clip
     return None
 
