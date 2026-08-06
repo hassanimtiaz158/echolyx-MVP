@@ -84,12 +84,18 @@ def test_build_criterion():
 
     device = torch.device("cpu")
     weights = torch.tensor([0.5, 2.0])
-    weighted = build_criterion(weights, use_class_weights=True, device=device)
+
+    # Focal Loss (default)
+    focal = build_criterion(weights, use_class_weights=False, device=device, use_focal_loss=True)
+    assert hasattr(focal, 'forward')
+
     # Weighted CE -> the weight tensor is attached and matches.
+    weighted = build_criterion(weights, use_class_weights=True, device=device, use_focal_loss=False)
     assert weighted.weight is not None
     assert torch.allclose(weighted.weight, weights)
+
     # Plain CE (sampler-only rebalancing) -> no weight in the loss.
-    plain = build_criterion(weights, use_class_weights=False, device=device)
+    plain = build_criterion(weights, use_class_weights=False, device=device, use_focal_loss=False)
     assert plain.weight is None
 
 

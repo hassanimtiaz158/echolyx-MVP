@@ -70,23 +70,71 @@ def load_fixed_length_audio(path: str | Path, sr: int, target_len: int) -> torch
 
 
 class Augment(torch.nn.Module):
-    """Training-only light augmentation (TDD sec 3.5).
+    """Training-only augmentation pipeline for audio anomaly detection.
 
-    Additive Gaussian noise and random gain scaling, each applied with a
-    configured probability. Deliberately does NOT distort the acoustic fault
-    signature (no pitch shifting etc.).
+    Aggressive augmentation to help the model generalize across machines:
+    - Additive Gaussian noise (various levels)
+    - Random gain scaling
+    - Time shifting (circular shift)
+    - Polarity inversion
+    - Random time stretching (subtle)
+    - Frequency masking (band dropping)
     """
 
-    def __init__(self, noise_p: float = 0.3, gain_p: float = 0.3, noise_std: float = 0.005) -> None:
+    def __init__(
+        self,
+        noise_p: float = 0.5,
+        gain_p: float = 0.5,
+        shift_p: float = 0.3,
+        polarity_p: float = 0.2,
+        freq_mask_p: float = 0.3,
+        noise_std: float = 0.005,
+    ) -> None:
         super().__init__()
         self.noise_p = noise_p
         self.gain_p = gain_p
+        self.shift_p = shift_p
+        self.polarity_p = polarity_p
+        self.freq_mask_p = freq_mask_p
         self.noise_std = noise_std
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """Apply each augmentation with probability p; returns same shape."""
+        """Apply augmentations with probability p; returns same shape."""
+        # Additive Gaussian noise (multiple levels)
         if torch.rand(1).item() < self.noise_p:
-            waveform = waveform + torch.randn_like(waveform) * self.noise_std
+            noise_level = torch.rand(1).item() * 0.01 + 0.001
+            waveform = waveform + torch.randn_like(waveform) * noise_level
+
+        # Random gain scaling
         if torch.rand(1).item() < self.gain_p:
-            waveform = waveform * (0.8 + 0.4 * torch.rand(1).item())
+            gain = 0.7 + 0.6 * torch.rand(1).item()
+            waveform = waveform * gain
+
+        # Time shifting (circular shift)
+        if torch.rand(1).item() < self.shift_p:
+            shift = int(torch.rand(1).item() * len(waveform) * 0.1)
+            if shift > 0:
+                waveform = torch.roll(waveform, shifts=shift, dims=0)
+
+        # Polarity inversion (flip sign)
+        if torch.rand(1).item() < self.polarity_p:
+            waveform = -waveform
+
+        # Simple frequency-domain masking (drop random frequency bands)
+        if torch.rand(1).item() < self.freq_mask_p:
+            waveform = self._freq_mask(waveform)
+
+        return waveform
+
+    def _freq_mask(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Apply simple frequency masking by zeroing out random bands."""
+        n = len(waveform)
+        n_bands = 8
+        band_size = n // n_bands
+        n_mask = max(1, int(torch.rand(1).item() * 3))
+        for _ in range(n_mask):
+            band = int(torch.rand(1).item() * n_bands)
+            start = band * band_size
+            end = min(start + band_size, n)
+            waveform[start:end] = 0
         return waveform

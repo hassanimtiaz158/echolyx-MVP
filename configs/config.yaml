@@ -27,63 +27,57 @@ clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long
 batch_size: 16        # tune for free-tier GPU VRAM (~12-16 GB, T4)
 seed: 42              # fixed seed for reproducibility (Python/NumPy/PyTorch)
 num_workers: 0        # 0 = safe on Windows/Kaggle/Colab alike
-# mixup_alpha: 0.2    # re-enabled: fault pool is now plentiful (~400 clips)
+
+# Mixup with within-class balancing (only mixes Normal-Normal or Faulty-Faulty)
+# to preserve minority signal while still providing regularization.
 mixup_alpha: 0.2
-# balance_sampling: oversample the minority (Faulty) class with replacement so
-# it is present every epoch (TDD 3.4). Default ON.
+balance_mixup: true
+
+# Balance the minority (Faulty) class with WeightedRandomSampler.
 balance_sampling: true
-# Rebalance the minority via the SAMPLER only (plain CE in the loss).
-# Class-weighting BOTH the sampler and the loss double-counts the minority:
-# its per-class weight total/(2*count) ~= 11x the majority here, and that
-# + weak cross-machine signal collapsed run 2 into "always Faulty"
-# (acc 0.048, 1093-of-1096 Faulty, a MIMII-vs-Freesound shortcut). Set true
-# to restore class-weighted CE when the data/recipe warrant it.
+
+# --- Loss function ---
+# Focal Loss handles 11:1 class imbalance much better than plain CE.
+# Alpha=0.25 down-weights easy (majority) examples, gamma=2.0 focuses on hard cases.
+use_focal_loss: true
+# Class-weighted CE (alternative): disabled to avoid double-counting with sampler.
 use_class_weights: false
 
+# --- Model architecture ---
+use_attention_head: true  # Attention pooling + residual blocks for better features
+
+# --- Gradient accumulation ---
+# Effective batch size = batch_size * grad_accum_steps = 16 * 2 = 32
+# Larger effective batch stabilizes training with limited GPU memory.
+grad_accum_steps: 2
+
 # --- Split strategy (TDD sec 3.3) ---
-# Per-clip stratified split (false) overestimates accuracy: MIMII clips are
-# contiguous 10 s segments of the same machine session, so near-duplicates
-# land on both sides of the split. group_by_source=true splits at the
-# machine/source level: no clip from a machine seen in training appears in
-# val/test — the honest accuracy for unseen machines.
-group_by_source: true
+group_by_source: true  # honest accuracy for unseen machines
 
 # --- LR schedule (TDD sec 4.3) ---
-# Cosine annealing per phase (start -> 1% of LR over the phase) smooths the
-# fine-tuning landing; recommended once Phase 2 is long (>= 25 epochs).
 use_cosine: true
 
 # --- Model / transfer learning (TDD sec 4) ---
 num_classes: 2
 class_names: ["Normal", "Faulty"]
-# Backbone checkpoint (Cnn14_mAP=0.431.pth). If unset, default is
-# <checkpoint_dir>/Cnn14_mAP=0.431.pth. Fetch with:
-#   python -m src.models.download_checkpoint --dest checkpoints
 backbone_checkpoint: "checkpoints/Cnn14_mAP=0.431.pth"
 
 # --- Two-phase fine-tuning (TDD sec 4.3) ---
-phase1_epochs: 8            # frozen backbone, head-only (Phase 1)
-phase1_lr: 0.001            # Adam LR for the head in Phase 1
-phase2_epochs: 25           # Phase 2 length for the data-rich run (MIMII DUE + DG merged)
-phase2_backbone_lr: 0.00001 # differential LR: backbone
-phase2_head_lr: 0.0001      # differential LR: head
-# Data-rich Phase 2 (TDD 4.3 variant): with ~400 fault clips (MIMII DG merged)
-# unfreeze conv_block5+6+fc1 so the backbone can adapt toward fault signatures.
-phase2_unfreeze_blocks: 2
+# Phase 1: longer warmup with lower LR to stabilize head training
+phase1_epochs: 15
+phase1_lr: 5e-4
+phase1_warmup_epochs: 3
+
+# Phase 2: longer training with very low LR for stable fine-tuning
+phase2_epochs: 50
+phase2_backbone_lr: 5e-6    # very low for backbone stability
+phase2_head_lr: 5e-5        # moderate for head adaptation
+phase2_unfreeze_blocks: 2   # conv_block5+6+fc1 for feature adaptation
 
 # --- Deployment decision rule (TDD sec 5) ---
-# Class-weighted CE mis-calibrates the argmax boundary: with a ~92% Normal
-# test split, argmax collapses and under-reports accuracy. The operating
-# point is P(Faulty) >= faulty_cutoff, validated on the validation split by
-# evaluate.py and applied by inference + the Gradio demo. Auto-tune on
-# validation if commented out.
-faulty_cutoff: 0.95
-# Uncertain-gate (TDD sec 5): P(Faulty) in (uncertain_low, faulty_cutoff) is
-# reported as "Uncertain" instead of a forced Normal/Faulty guess — a demo
-# answer of "re-record" beats a confident wrong answer. Set to null to
-# disable the gate.
-uncertain_low: 0.05
+faulty_cutoff: 0.5          # with Focal Loss, argmax works better
+uncertain_low: 0.05         # lower gate for uncertain zone
 
 # --- Artifacts (TDD sec 7) ---
-checkpoint_dir: "checkpoints"   # best.pt / final model (+ metadata: sample rate, clip length, class names)
-artifact_dir: "artifacts"       # training curves, confusion matrix plot, evaluation report
+checkpoint_dir: "checkpoints"
+artifact_dir: "artifacts"

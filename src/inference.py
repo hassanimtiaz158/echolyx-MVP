@@ -112,3 +112,42 @@ def predict_single_file(
     )
     confidence = max(probabilities.values())
     return Prediction(label=label, probabilities=probabilities, confidence=confidence)
+
+
+def predict_ensemble(
+    path: str | Path,
+    models: list[TransferCnn14],
+    config: dict,
+) -> Prediction:
+    """Ensemble prediction by averaging probabilities across multiple models.
+
+    More robust than single model - reduces variance and improves accuracy.
+    """
+    waveform = load_fixed_length_audio(
+        path,
+        config["sample_rate"],
+        config["sample_rate"] * config["clip_seconds"],
+    )
+    device = next(models[0].parameters()).device
+    class_names = config["class_names"]
+    num_classes = len(class_names)
+
+    all_probs = []
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            logits = model(waveform.unsqueeze(0).to(device))["logits"]
+        probs = F.softmax(logits, dim=-1).squeeze(0).cpu()
+        all_probs.append(probs)
+
+    # Average probabilities
+    avg_probs = torch.stack(all_probs).mean(dim=0).tolist()
+    probabilities = {name: float(p) for name, p in zip(class_names, avg_probs)}
+    label = decide_label(
+        probabilities,
+        class_names,
+        config.get("faulty_cutoff"),
+        config.get("uncertain_low"),
+    )
+    confidence = max(probabilities.values())
+    return Prediction(label=label, probabilities=probabilities, confidence=confidence)

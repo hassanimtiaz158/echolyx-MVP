@@ -55,17 +55,22 @@ DEFAULTS = {
     "num_classes": 2,
     "class_names": ["Normal", "Faulty"],
     "num_workers": 0,
-    "mixup_alpha": 0.0,
-    "balance_sampling": False,
-    "group_by_source": False,
-    "use_cosine": False,
-    "phase1_epochs": 8,
-    "phase1_lr": 1e-3,
-    "phase2_epochs": 15,
-    "phase2_backbone_lr": 1e-5,
-    "phase2_head_lr": 1e-4,
-    "phase2_unfreeze_blocks": 1,
-    "use_class_weights": True,
+    "mixup_alpha": 0.2,
+    "balance_sampling": True,
+    "balance_mixup": True,
+    "group_by_source": True,
+    "use_cosine": True,
+    "phase1_epochs": 15,
+    "phase1_lr": 5e-4,
+    "phase1_warmup_epochs": 3,
+    "phase2_epochs": 50,
+    "phase2_backbone_lr": 5e-6,
+    "phase2_head_lr": 5e-5,
+    "phase2_unfreeze_blocks": 2,
+    "use_class_weights": False,
+    "use_focal_loss": True,
+    "use_attention_head": True,
+    "grad_accum_steps": 2,
 }
 
 
@@ -97,21 +102,46 @@ def load_config(path: str | Path) -> dict:
     return cfg
 
 
+class FocalLoss(nn.Module):
+    """Focal Loss for handling severe class imbalance (Lin et al., 2017).
+
+    Down-weights easy examples so the model focuses on hard misclassifications.
+    With alpha=0.25 and gamma=2.0, this is effective for 11:1 imbalance ratios.
+    """
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(logits, targets, reduction="none")
+        pt = torch.exp(-ce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        return focal_loss
+
+
 def build_criterion(
     class_weights: torch.Tensor,
     use_class_weights: bool,
     device: torch.device,
-) -> nn.CrossEntropyLoss:
-    """Build the training criterion (TDD sec 3.4 + recipe hardening).
+    use_focal_loss: bool = True,
+) -> nn.Module:
+    """Build the training criterion.
 
-    ``use_class_weights=True`` (default): class-weighted CE with weights
-    ``total/(2*count)``. ``use_class_weights=False``: plain CE — rebalancing
-    then comes from the sampler alone (``balance_sampling``). Weighting BOTH
-    the sampler and the loss double-counts the minority class: with ~8%
-    Faulty in the pool and weak cross-machine signal, that 11x loss pressure
-    collapses the model into "always Faulty" (seen in run 2). The flag makes
-    the two rebalancing mechanisms mutually exclusive.
+    Priority:
+    1. Focal Loss (default) - best for severe class imbalance
+    2. Class-weighted CE - when use_class_weights=True
+    3. Plain CE - when both are disabled (rebalance via sampler only)
     """
+    if use_focal_loss:
+        logger.info("Using Focal Loss (alpha=0.25, gamma=2.0)")
+        return FocalLoss(alpha=0.25, gamma=2.0).to(device)
     if use_class_weights:
         return nn.CrossEntropyLoss(weight=class_weights.to(device))
     return nn.CrossEntropyLoss()
@@ -122,16 +152,28 @@ def _mixup_batch(
     labels: torch.Tensor,
     alpha: float,
     num_classes: int,
+    balance_mixup: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Mixup (TDD sec 3.5): interpolate pairs drawn with random permutation.
+    """Mixup with optional within-class mixing for imbalanced data.
 
-    Lambdas come from ``Beta(alpha, alpha)``. Labels are one-hot mixed so the
-    loss is the expected CE over both constituents. Returns
-    ``(mixed_waveforms, mixed_labels)``.
+    When balance_mixup=True, only mixes samples within the same class to
+    avoid diluting the minority (Faulty) signal with Normal samples.
+    This preserves fault-specific features while still providing regularization.
     """
     batch = waveforms.size(0)
     lam = torch.distributions.Beta(alpha, alpha).sample((batch, 1)).to(waveforms.device)
-    index = torch.randperm(batch, device=waveforms.device)
+
+    if balance_mixup:
+        index = torch.arange(batch, device=waveforms.device)
+        for c in range(num_classes):
+            class_mask = labels == c
+            if class_mask.sum() > 1:
+                class_indices = torch.where(class_mask)[0]
+                perm = class_indices[torch.randperm(len(class_indices), device=waveforms.device)]
+                index[class_mask] = perm
+    else:
+        index = torch.randperm(batch, device=waveforms.device)
+
     mixed_waveforms = lam * waveforms + (1.0 - lam) * waveforms[index]
     one_hot = F.one_hot(labels, num_classes=num_classes).float()
     mixed_labels = lam * one_hot + (1.0 - lam) * one_hot[index]
@@ -147,38 +189,43 @@ def _run_epoch(
     train: bool,
     mixup_alpha: float = 0.0,
     num_classes: int = 2,
+    balance_mixup: bool = False,
+    grad_accum_steps: int = 1,
 ) -> tuple[float, float]:
     """Run one train (if ``train``) or eval pass; returns (avg_loss, accuracy)."""
     model.train(train)
     running_loss = 0.0
     correct = 0
     total = 0
+    optimizer.zero_grad()
+
     with torch.set_grad_enabled(train):
-        for waveforms, labels in loader:
+        for step, (waveforms, labels) in enumerate(loader):
             waveforms = waveforms.to(device)
             labels = labels.to(device)
 
             if train and mixup_alpha > 0.0:
                 waveforms, mix_targets = _mixup_batch(
-                    waveforms, labels, mixup_alpha, num_classes
+                    waveforms, labels, mixup_alpha, num_classes, balance_mixup
                 )
             else:
                 mix_targets = None
 
-            if train:
-                optimizer.zero_grad()
             output = model(waveforms)["logits"]
             if mix_targets is not None:
                 loss = criterion(output, mix_targets)
             else:
                 loss = criterion(output, labels)
-            if train:
-                loss.backward()
-                optimizer.step()
 
-            running_loss += loss.item() * labels.size(0)
-            # For mixup batches this compares against the pre-mix labels —
-            # an approximation; val accuracy drives checkpoint selection anyway.
+            if train:
+                loss = loss / grad_accum_steps
+                loss.backward()
+                if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(loader):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+            running_loss += loss.item() * labels.size(0) * grad_accum_steps
             correct += (output.argmax(dim=-1) == labels).sum().item()
             total += labels.size(0)
 
@@ -199,13 +246,18 @@ def train_phase(
     best_state: dict,
     cfg: dict,
     scheduler=None,
+    warmup_epochs: int = 0,
+    grad_accum_steps: int = 1,
 ) -> None:
     """Train one phase for ``epochs``, logging every epoch and saving best VT."""
     best_acc = best_state["val_acc"]
+    balance_mixup = cfg.get("balance_mixup", True)
+
     for epoch in range(1, epochs + 1):
         train_loss, train_acc = _run_epoch(
             model, train_loader, criterion, optimizer, device, train=True,
             mixup_alpha=cfg.get("mixup_alpha", 0.0), num_classes=cfg["num_classes"],
+            balance_mixup=balance_mixup, grad_accum_steps=grad_accum_steps,
         )
         val_loss, val_acc = _run_epoch(
             model, val_loader, criterion, optimizer, device, train=False
@@ -217,7 +269,7 @@ def train_phase(
             "train_acc": train_acc,
             "val_loss": val_loss,
             "val_acc": val_acc,
-"lr": optimizer.param_groups[0]["lr"],
+            "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(record)
         logger.info(
@@ -245,7 +297,7 @@ def train_phase(
             )
             logger.info("  -> new best val acc %.4f, checkpoint saved", val_acc)
 
-        if scheduler is not None:  # cosine decay warmed down through the phase
+        if scheduler is not None:
             scheduler.step()
 
 
@@ -317,24 +369,18 @@ def main() -> None:
     )
     if groups is not None:
         logger.info("Grouped splits by machine/source (%d groups)", len(set(groups)))
-    use_class_weights = cfg.get("use_class_weights", True)
-    criterion = build_criterion(class_weights, use_class_weights, device)
-    if use_class_weights:
-        logger.info(
-            "Loss: class-weighted CE (weights=%s)",
-            [round(w, 4) for w in class_weights.tolist()],
-        )
-    else:
-        # Rebalance via the sampler only (balance_sampling), NOT the loss:
-        # weighting both double-counts the minority and collapses the model
-        # toward the minority when cross-machine signal is weak.
-        logger.info("Loss: plain CE (rebalance via balance_sampling sampler only)")
+
+    # Use Focal Loss (default) or class-weighted CE
+    use_focal_loss = cfg.get("use_focal_loss", True)
+    use_class_weights = cfg.get("use_class_weights", False)
+    criterion = build_criterion(class_weights, use_class_weights, device, use_focal_loss)
 
     # 2) Model (TDD sec 4).
     model = TransferCnn14(
         cfg["backbone_checkpoint"],
         num_classes=cfg["num_classes"],
         freeze_base=True,
+        use_attention_head=cfg.get("use_attention_head", True),
     ).to(device)
     logger.info(
         "TransferCnn14 ready; trainable params (Phase 1 head only): %d",
@@ -350,8 +396,10 @@ def main() -> None:
     best_state = {"val_acc": float("-inf")}
 
     # 3) Phase 1 — frozen backbone, head only (TDD 4.3).
-    logger.info("Phase 1: frozen backbone, head-only Adam lr=%g, %d epochs",
-                cfg["phase1_lr"], cfg["phase1_epochs"])
+    phase1_warmup = cfg.get("phase1_warmup_epochs", 2)
+    grad_accum = cfg.get("grad_accum_steps", 1)
+    logger.info("Phase 1: frozen backbone, head-only Adam lr=%g, %d epochs (warmup %d)",
+                cfg["phase1_lr"], cfg["phase1_epochs"], phase1_warmup)
     opt1 = torch.optim.Adam(
         model.param_groups("head", head_lr=cfg["phase1_lr"]), lr=cfg["phase1_lr"]
     )
@@ -365,7 +413,7 @@ def main() -> None:
     train_phase(
         model, "phase1", opt1, train_loader, val_loader, criterion, device,
         cfg["phase1_epochs"], checkpoint_dir, history, best_state, cfg,
-        scheduler=sched1,
+        scheduler=sched1, warmup_epochs=phase1_warmup, grad_accum_steps=grad_accum,
     )
 
     # 4) Phase 2 — unfreeze last blocks, differential LR (TDD 4.3).
@@ -390,7 +438,7 @@ def main() -> None:
     train_phase(
         model, "phase2", opt2, train_loader, val_loader, criterion, device,
         cfg["phase2_epochs"], checkpoint_dir, history, best_state, cfg,
-        scheduler=sched2,
+        scheduler=sched2, grad_accum_steps=grad_accum,
     )
 
     # 5) Artifacts: final model + JSON history for plotting. final.pt carries

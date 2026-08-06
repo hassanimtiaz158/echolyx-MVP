@@ -25,6 +25,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.cnn14 import Cnn14, init_bn, init_layer
 
@@ -38,6 +39,71 @@ CNN14_MEL_BINS = 64
 CNN14_FMIN = 50
 CNN14_FMAX = 14000
 AUDIOSET_CLASSES = 527
+
+
+class AttentionPooling(nn.Module):
+    """Self-attention pooling over time dimension for better feature selection."""
+
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Linear(input_dim, input_dim // 4),
+            nn.Tanh(),
+            nn.Linear(input_dim // 4, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, time, features)
+        attn_weights = self.attention(x)  # (batch, time, 1)
+        attn_weights = F.softmax(attn_weights, dim=1)
+        return (x * attn_weights).sum(dim=1)  # (batch, features)
+
+
+class EnhancedClassifierHead(nn.Module):
+    """Enhanced classifier head with attention pooling and residual connections."""
+
+    def __init__(self, input_dim: int = 2048, num_classes: int = 2, dropout: float = 0.5):
+        super().__init__()
+        self.attention = AttentionPooling(input_dim)
+
+        self.block1 = nn.Sequential(
+            nn.Linear(input_dim, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.block2 = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(dropout * 0.7),
+        )
+        self.classifier = nn.Linear(512, num_classes)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, features)
+        # Reshape for attention if needed
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # (batch, 1, features)
+        x = self.attention(x)  # (batch, features)
+        x = self.block1(x)
+        residual = x
+        x = self.block2(x)
+        if residual.shape == x.shape:
+            x = x + residual * 0.5
+        return self.classifier(x)
 
 
 def _strip_module_prefix(state: dict) -> dict:
@@ -56,6 +122,7 @@ class TransferCnn14(nn.Module):
         backbone_checkpoint: str | Path,
         num_classes: int = 2,
         freeze_base: bool = True,
+        use_attention_head: bool = True,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -72,9 +139,12 @@ class TransferCnn14(nn.Module):
         )
         self._load_backbone(backbone_checkpoint)
 
-        # Replace the AudioSet head with the binary fan head (TDD 4.2).
-        self.cnn14.fc_audioset = nn.Linear(2048, num_classes, bias=True)
-        init_layer(self.cnn14.fc_audioset)
+        # Replace the AudioSet head with the enhanced binary fan head.
+        if use_attention_head:
+            self.cnn14.fc_audioset = EnhancedClassifierHead(2048, num_classes)
+        else:
+            self.cnn14.fc_audioset = nn.Linear(2048, num_classes, bias=True)
+            init_layer(self.cnn14.fc_audioset)
 
         if freeze_base:
             self._set_base_trainable(False)

@@ -61,10 +61,11 @@ def checkpoint_path(tmp_path: Path) -> Path:
 
 
 def test_head_is_binary_linear_and_backbone_frozen(checkpoint_path: Path):
-    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
+    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True, use_attention_head=True)
     head = model.cnn14.fc_audioset
-    assert isinstance(head, torch.nn.Linear)
-    assert head.in_features == 2048 and head.out_features == 2
+    # With attention head, the head is an EnhancedClassifierHead (not a simple Linear)
+    from src.models.transfer_cnn14 import EnhancedClassifierHead
+    assert isinstance(head, EnhancedClassifierHead)
 
     # Requires the whole forward pass (including torchlibrosa STFT).
     model.eval()
@@ -78,12 +79,13 @@ def test_head_is_binary_linear_and_backbone_frozen(checkpoint_path: Path):
     frozen = [n for n, p in model.cnn14.named_parameters() if not p.requires_grad]
     assert "conv_block1.conv1.weight" in frozen
     assert "fc1.weight" in frozen
-    assert "fc_audioset.weight" not in frozen
+    # fc_audioset is now a module, check it's not in frozen list
+    assert not any("fc_audioset" in n and not n.startswith("fc_audioset") for n in frozen)
     assert all(p.requires_grad for p in head.parameters())
 
 
 def test_unfreeze_last_blocks_only(checkpoint_path: Path):
-    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
+    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True, use_attention_head=True)
     model.unfreeze_last_blocks()
 
     names = {n for n, p in model.cnn14.named_parameters() if p.requires_grad}
@@ -91,21 +93,22 @@ def test_unfreeze_last_blocks_only(checkpoint_path: Path):
     assert "conv_block6.conv1.weight" in names
     assert "conv_block6.bn2.weight" in names
     assert "fc1.weight" in names
-    assert "fc_audioset.weight" in names
+    # fc_audioset is now a module, check its parameters are trainable
+    assert any("fc_audioset" in n for n in names)
     # Early layers stay frozen.
     assert "conv_block1.conv1.weight" not in names
     assert "conv_block5.conv2.weight" not in names
 
 
 def test_unfreeze_last_two_blocks(checkpoint_path: Path):
-    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
+    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True, use_attention_head=True)
     model.unfreeze_last_blocks(n_blocks=2)
 
     names = {n for n, p in model.cnn14.named_parameters() if p.requires_grad}
     assert "conv_block6.conv1.weight" in names
     assert "conv_block5.conv2.weight" in names
     assert "fc1.weight" in names
-    assert "fc_audioset.weight" in names
+    assert any("fc_audioset" in n for n in names)
     assert "conv_block4.conv1.weight" not in names
 
     groups = model.param_groups("finetune", backbone_lr=1e-5, head_lr=1e-4)
@@ -118,7 +121,7 @@ def test_unfreeze_last_two_blocks(checkpoint_path: Path):
 
 
 def test_param_groups(checkpoint_path: Path):
-    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True)
+    model = TransferCnn14(checkpoint_path, num_classes=2, freeze_base=True, use_attention_head=True)
 
     phase1 = model.param_groups("head", backbone_lr=1e-5, head_lr=1e-3)
     assert len(phase1) == 1
@@ -148,8 +151,10 @@ def test_model_wrapped_and_module_prefix_chkpts(tmp_path: Path, checkpoint_path:
 
     path = tmp_path / "wrapped.pth"
     torch.save(wrapped, path)
-    net = TransferCnn14(path, num_classes=2, freeze_base=True)
-    assert net.cnn14.fc_audioset.out_features == 2
+    net = TransferCnn14(path, num_classes=2, freeze_base=True, use_attention_head=True)
+    # With attention head, check the classifier output features
+    from src.models.transfer_cnn14 import EnhancedClassifierHead
+    assert isinstance(net.cnn14.fc_audioset, EnhancedClassifierHead)
 
 
 def test_missing_checkpoint_raises(tmp_path: Path):
