@@ -1,0 +1,60 @@
+INFO: Device: cuda | config: configs/config.yaml
+INFO: Sanity clip 'fan's frame broken.mp3' not in manifest (expected: it is held out).
+INFO: Loaded pretrained backbone from checkpoints/Cnn14_mAP=0.431.pth
+INFO: Loaded checkpoint checkpoints/best.pt (metadata: {'sample_rate': 32000, 'clip_length_sec': 10, 'num_classes': 2, 'class_names': ['Normal', 'Faulty'], 'phase': 'phase2', 'epoch': 23, 'val_acc': 0.48622589531680444, 'best': True})
+INFO: Saved artifacts/confusion_matrix.png
+INFO: Saved artifacts/training_curves.png
+============================================================
+TEST SPLIT METRICS (Faulty = positive class)
+============================================================
+accuracy : 0.4298
+precision: 0.1234
+recall   : 0.9667   <- priority metric (missed faults are costly)
+F1       : 0.2189
+
+              precision    recall  f1-score   support
+
+      Normal      0.992     0.381     0.551       666
+      Faulty      0.123     0.967     0.219        60
+
+    accuracy                          0.430       726
+   macro avg      0.558     0.674     0.385       726
+weighted avg      0.920     0.430     0.524       726
+
+predicted-label distribution: {1: 470, 0: 256} (majority-class collapse shows as ~all Normal)
+
+============================================================
+THRESHOLD-TUNED METRICS (Faulty cutoff = P(Faulty) >= 0.95)
+============================================================
+cutoff config faulty_cutoff (validation F1 = 0.433)
+accuracy : 0.9118
+precision: 0.4655
+recall   : 0.4500   <- priority metric (missed faults are costly)
+F1       : 0.4576
+confusion matrix (rows=actual, cols=predicted, order Normal / Faulty):
+  Normal   [635, 31]
+  Faulty   [33, 27]
+predicted-label distribution: {0: 668, 1: 58}
+
+============================================================
+REAL-WORLD SANITY CHECK (excluded from training; not part of the metrics above)
+============================================================
+Held-out clip NOT FOUND - sanity check skipped (reported honestly).
+
+============================================================
+REAL-WORLD HOLD-OUT SET (real broken-fan clips, never in training)
+============================================================
+file                                                           predicted   conf  P(Faulty)
+119887__cmusounddesign__bc-fan-scraping.wav                    Normal     0.966      0.034
+24231__soundhead__fan-abuse.wav                                Normal     1.000      0.000
+442137__simon_mck__oven-fan-broken-wobbling-hum.wav            Faulty     0.979      0.979
+453996__kyles__fan-bathroom-cheap-rusty-broken-turned-on-squ   Normal     1.000      0.000
+529757__eitabyte__hd-com-defeito.wav                           Normal     1.000      0.000
+546249__tosha73__broken-fan.wav                                Faulty     0.953      0.953
+613157__dbs_sounds__machfan_industrial_fan_defect_bearing_ro   Faulty     0.988      0.988
+681651__itinerantmonk108__broken-window-fan-noise.wav          Faulty     0.968      0.968
+723154__sadiquecat__broken-fan.flac                            Normal     1.000      0.000
+841674__ivolipa__broken-fan-heater.wav                         Normal     1.000      0.000
+855265__kasparbossers__bus-stop-broken-fan-tremolo.wav         Normal     1.000      0.000
+-> flagged 4 of 11 real broken-fan clips as Faulty
+note: expected Faulty for all clips; a miss here means the fault sound is out-of-distribution for the model (honest result).
