@@ -27,13 +27,24 @@ clip_seconds: 10      # fixed clip length (matches MIMII); short->zero-pad, long
 batch_size: 16        # tune for free-tier GPU VRAM (~12-16 GB, T4)
 seed: 42              # fixed seed for reproducibility (Python/NumPy/PyTorch)
 num_workers: 0        # 0 = safe on Windows/Kaggle/Colab alike
-# mixup_alpha: 0.2    # DISABLED: with 12:1 imbalance mixup dilutes the scarce
-#                     # fault signal (fault clips are blended into normal-soft
-#                     # labels). Re-enable only once fault data is plentiful.
-mixup_alpha: 0.0
+# mixup_alpha: 0.2    # re-enabled: fault pool is now plentiful (~400 clips)
+mixup_alpha: 0.2
 # balance_sampling: oversample the minority (Faulty) class with replacement so
 # it is present every epoch (TDD 3.4). Default ON.
 balance_sampling: true
+
+# --- Split strategy (TDD sec 3.3) ---
+# Per-clip stratified split (false) overestimates accuracy: MIMII clips are
+# contiguous 10 s segments of the same machine session, so near-duplicates
+# land on both sides of the split. group_by_source=true splits at the
+# machine/source level: no clip from a machine seen in training appears in
+# val/test — the honest accuracy for unseen machines.
+group_by_source: true
+
+# --- LR schedule (TDD sec 4.3) ---
+# Cosine annealing per phase (start -> 1% of LR over the phase) smooths the
+# fine-tuning landing; recommended once Phase 2 is long (>= 25 epochs).
+use_cosine: true
 
 # --- Model / transfer learning (TDD sec 4) ---
 num_classes: 2
@@ -60,6 +71,11 @@ phase2_unfreeze_blocks: 2
 # evaluate.py and applied by inference + the Gradio demo. Auto-tune on
 # validation if commented out.
 faulty_cutoff: 0.95
+# Uncertain-gate (TDD sec 5): P(Faulty) in (uncertain_low, faulty_cutoff) is
+# reported as "Uncertain" instead of a forced Normal/Faulty guess — a demo
+# answer of "re-record" beats a confident wrong answer. Set to null to
+# disable the gate.
+uncertain_low: 0.05
 
 # --- Artifacts (TDD sec 7) ---
 checkpoint_dir: "checkpoints"   # best.pt / final model (+ metadata: sample rate, clip length, class names)

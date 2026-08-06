@@ -45,7 +45,7 @@ from sklearn.metrics import (
 )
 
 from src.data.collect import collect, find_sanity_clip
-from src.data.dataset import make_dataloaders
+from src.data.dataset import derive_group_keys, make_dataloaders
 from src.inference import load_model, predict_single_file
 from src.models.transfer_cnn14 import TransferCnn14
 from src.train import load_config, set_seed
@@ -236,7 +236,7 @@ def run_sanity_check(
 
     pred = predict_single_file(clip_path, model, config)
     print(f"file        : {clip_path}")
-    print(f"prediction  : {pred.label} (confidence {pred.probabilities[pred.label]:.3f})")
+    print(f"prediction  : {pred.label} (confidence {pred.confidence:.3f})")
     print(f"probabilities: " + ", ".join(
         f"{name}: {p:.3f}" for name, p in pred.probabilities.items()
     ))
@@ -274,12 +274,18 @@ def run_broken_fan_check(
     print(f"{'file':<62} {'predicted':<9} {'conf':>6}  {'P(Faulty)':>9}")
     for clip in clips:
         pred = predict_single_file(clip, model, config)
-        conf = pred.probabilities[pred.label]
+        conf = pred.confidence
         p_faulty = pred.probabilities[config["class_names"][1]]
         if pred.label == config["class_names"][1]:
             flagged += 1
         print(f"{clip.name[:60]:<62} {pred.label:<9} {conf:>6.3f}  {p_faulty:>9.3f}")
     print(f"-> flagged {flagged} of {len(clips)} real broken-fan clips as Faulty")
+    gated = config.get("uncertain_low")
+    if gated is not None:
+        print(f"note: uncertain-gate active (P(Faulty) in ({gated}, "
+              f"{config.get('faulty_cutoff', 1.0)}) = 'Uncertain'); misses are "
+              "still honest, but borderline clips now ask for a re-record instead "
+              "of guessing.")
     print("note: expected Faulty for all clips; a miss here means the fault "
           "sound is out-of-distribution for the model (honest result).")
 
@@ -290,10 +296,11 @@ def evaluate(config_path: str | Path) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s | config: %s", device, config_path)
 
-    # Data pipeline (same seed as training -> identical test split).
+    # Data pipeline (same seed + split strategy as training -> identical splits).
     filepaths, labels = collect(
         cfg["mimii_root"], cfg["extra_normal_root"], cfg.get("sanity_clip_filename")
     )
+    groups = derive_group_keys(filepaths) if cfg.get("group_by_source", False) else None
     _, val_loader, test_loader, _ = make_dataloaders(
         filepaths,
         labels,
@@ -302,7 +309,10 @@ def evaluate(config_path: str | Path) -> None:
         batch_size=cfg["batch_size"],
         num_workers=cfg.get("num_workers", 0),
         seed=cfg["seed"],
+        groups=groups,
     )
+    if groups is not None:
+        logger.info("Grouped splits by machine/source (%d groups)", len(set(groups)))
 
     # Model + best checkpoint.
     checkpoint_path = Path(cfg["checkpoint_dir"]) / "best.pt"

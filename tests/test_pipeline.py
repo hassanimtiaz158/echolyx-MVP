@@ -4,7 +4,8 @@ These run entirely on synthetic audio generated in ``tmp_path``, so no real
 dataset is needed. Coverage:
 - preprocess: ``load_fixed_length_audio`` pad/trim to exact length, mono.
 - dataset: ``build_splits`` stratified 70/15/15, ``get_class_weights``
-  (total/(2*count)), ``FanSoundDataset`` + ``make_dataloaders`` shapes/labels.
+  (total/(2*count)), ``FanSoundDataset`` + ``make_dataloaders`` shapes/labels,
+  grouped (machine/source) splits with no leakage, and ``derive_group_key``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import torch
 from src.data.dataset import (
     FanSoundDataset,
     build_splits,
+    derive_group_key,
+    derive_group_keys,
     get_class_weights,
     make_dataloaders,
 )
@@ -93,6 +96,52 @@ def test_build_splits_stratified():
     train_set = set(train.filepaths)
     assert train_set.isdisjoint(val.filepaths)
     assert train_set.isdisjoint(test.filepaths)
+
+
+def test_derive_group_key():
+    # MIMII DUE vs DG share section ids -> different groups (separate archives).
+    due = Path("data/raw/mimii/fan/section_00_source_train_normal_0000_spd_1.wav")
+    dg = Path("data/raw/mimii/fan_dg/section_00_source_train_anomaly_0000.wav")
+    assert derive_group_key(due) == "due:section_00_source"
+    assert derive_group_key(dg) == "dg:section_00_source"
+    assert derive_group_key(due) != derive_group_key(dg)
+    # Same machine, other pool/domain tokens -> same group.
+    other = Path("data/raw/mimii/fan/section_00_target_test_anomaly_0007_spd_3.wav")
+    assert derive_group_key(other) == "due:section_00_target"
+    # Freesound clips are one group each.
+    fs = Path("data/raw/freesound/desk_fan.wav")
+    assert derive_group_key(fs) == "fs:desk_fan"
+
+
+def test_build_splits_grouped_no_machine_leakage():
+    # 4 MIMII machines (2 normal + 2 faulty clips each) + 3 Freesound clips:
+    # every clip of a machine must stay in ONE split.
+    files: list[Path] = []
+    labels: list[int] = []
+    for sec in (0, 1, 2, 3):
+        for kind, lbl in (("normal", 0), ("anomaly", 1)):
+            files.append(Path(f"data/raw/mimii/fan/section_0{sec}_source_train_{kind}_0000_spd_1.wav"))
+            labels.append(lbl)
+            files.append(Path(f"data/raw/mimii/fan/section_0{sec}_source_train_{kind}_0001_spd_1.wav"))
+            labels.append(lbl)
+    for i in range(3):
+        files.append(Path(f"data/raw/freesound/extra_{i}.wav"))
+        labels.append(0)
+
+    groups = derive_group_keys(files)
+    train, val, test = build_splits(files, labels, seed=42, groups=groups)
+
+    assert len(train.filepaths) + len(val.filepaths) + len(test.filepaths) == len(files)
+    # No group straddles two splits.
+    def group_set(split):
+        return {derive_group_key(p) for p in split.filepaths}
+    assert group_set(train).isdisjoint(group_set(val))
+    assert group_set(train).isdisjoint(group_set(test))
+    assert group_set(val).isdisjoint(group_set(test))
+    # Both classes present in every split (mixed groups carry both).
+    assert set(train.labels) == {0, 1}
+    assert set(val.labels) == {0, 1}
+    assert set(test.labels) == {0, 1}
 
 
 def test_make_dataloaders_and_dataset(wav_dir):

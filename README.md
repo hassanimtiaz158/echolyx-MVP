@@ -37,12 +37,14 @@ Gradio UI (label + confidence)
 Two-phase fine-tuning (TDD 4.3): **Phase 1** trains only the new head with a
 frozen backbone (Adam, lr=1e-3, 8 epochs); **Phase 2** unfreezes the last two
 conv blocks (`conv_block5+6`) + `fc1` with differential learning rates
-(backbone 1e-5, head 1e-4, 25 epochs) — the data-rich recipe used when the
-MIMII DUE + MIMII DG sections are pooled. Loss is class-weighted
-cross-entropy (`total / (2 * class_count)`), the train loader oversamples the
-Faulty minority (`balance_sampling: true`), and splits are stratified 70/15/15,
-seed 42. For small data, drop `phase2_unfreeze_blocks` to 1 and `phase2_epochs`
-to 15.
+(backbone 1e-5, head 1e-4, 25 epochs) and cosine LR decay. Loss is
+class-weighted cross-entropy (`total / (2 * class_count)`), the train loader
+oversamples the Faulty minority (`balance_sampling: true`) and applies mixup
+(`mixup_alpha: 0.2`). Splits are **grouped by machine/source** (`group_by_source:
+true`, TDD 3.3): no clip from a machine seen in training appears in
+validation/test — the honest accuracy for unseen machines. For small data,
+drop `phase2_unfreeze_blocks` to 1, `phase2_epochs` to 15 and
+`group_by_source` to false.
 
 ## Setup
 

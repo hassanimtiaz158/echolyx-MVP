@@ -20,7 +20,12 @@ pytest.importorskip(
 
 import soundfile as sf
 
-from src.inference import Prediction, load_model, predict_single_file
+from src.inference import (
+    Prediction,
+    decide_label,
+    load_model,
+    predict_single_file,
+)
 from src.models.cnn14 import Cnn14
 from src.models.transfer_cnn14 import (
     AUDIOSET_CLASSES,
@@ -82,6 +87,20 @@ def test_predict_single_file_shapes_and_probabilities(model_and_config, tmp_path
     assert pred.probabilities[pred.label] == max(pred.probabilities.values())
 
 
+def test_decide_label_rules():
+    names = ["Normal", "Faulty"]
+    # argmax without cutoff
+    assert decide_label({"Normal": 0.4, "Faulty": 0.6}, names) == "Faulty"
+    assert decide_label({"Normal": 0.9, "Faulty": 0.1}, names) == "Normal"
+    # calibrated cutoff: Faulty only above the cutoff
+    assert decide_label({"Normal": 0.1, "Faulty": 0.9}, names, 0.95) == "Normal"
+    assert decide_label({"Normal": 0.02, "Faulty": 0.98}, names, 0.95) == "Faulty"
+    # uncertain-gate: middle band -> Uncertain
+    assert decide_label({"Normal": 0.5, "Faulty": 0.5}, names, 0.95, 0.05) == "Uncertain"
+    assert decide_label({"Normal": 0.99, "Faulty": 0.01}, names, 0.95, 0.05) == "Normal"
+    assert decide_label({"Normal": 0.01, "Faulty": 0.99}, names, 0.95, 0.05) == "Faulty"
+
+
 def test_predict_respects_configured_cutoff(model_and_config, tmp_path):
     model = model_and_config
     audio = tmp_path / "clip.wav"
@@ -101,6 +120,13 @@ def test_predict_respects_configured_cutoff(model_and_config, tmp_path):
     p_argmax = base.probabilities[base.label]
     cfg_same = {**CONFIG, "faulty_cutoff": p_argmax}
     assert predict_single_file(audio, model, cfg_same).label == base.label
+
+    # Uncertain-gate active: label must stay within the three-way rule and the
+    # confidence field always carries the top class probability.
+    cfg_gate = {**CONFIG, "faulty_cutoff": 0.95, "uncertain_low": 0.05}
+    gated = predict_single_file(audio, model, cfg_gate)
+    assert gated.label in {"Normal", "Faulty", "Uncertain"}
+    assert gated.confidence == max(gated.probabilities.values())
 
 
 def test_load_model_missing_checkpoint_raises(tmp_path):

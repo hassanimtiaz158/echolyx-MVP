@@ -28,8 +28,33 @@ logger = logging.getLogger(__name__)
 class Prediction:
     """Result of a single-clip inference."""
 
-    label: str  # e.g. "Faulty"
+    label: str  # e.g. "Faulty" (or "Uncertain" when the uncertain-gate is on)
     probabilities: dict[str, float]  # e.g. {"Normal": 0.12, "Faulty": 0.88}
+    confidence: float  # P(label), the highest class probability
+
+
+def decide_label(
+    probabilities: dict[str, float],
+    class_names: list[str],
+    faulty_cutoff: float | None = None,
+    uncertain_low: float | None = None,
+) -> str:
+    """Turn class probabilities into a decision label (TDD sec 5).
+
+    - No cutoff: argmax (classic 0.5 boundary).
+    - ``faulty_cutoff``: label Faulty only when P(Faulty) >= cutoff, else
+      Normal — the calibrated operating point under class-weighted CE.
+    - ``uncertain_low`` (with a cutoff): probabilities in
+      (uncertain_low, faulty_cutoff) are "Uncertain" — the deployment gate
+      that converts borderline guesses into "re-record" instead of a wrong
+      confident answer.
+    """
+    p_faulty = probabilities[class_names[1]]
+    if not isinstance(faulty_cutoff, (int, float)):
+        return max(class_names, key=lambda name: probabilities[name])
+    if isinstance(uncertain_low, (int, float)) and uncertain_low < p_faulty < faulty_cutoff:
+        return "Uncertain"
+    return class_names[1] if p_faulty >= faulty_cutoff else class_names[0]
 
 
 def load_model(
@@ -62,7 +87,9 @@ def predict_single_file(
     """Classify one audio clip into Normal/Faulty with softmax probabilities.
 
     Preprocessing follows the config (sample_rate / clip_seconds, TDD 3.2).
-    Deterministic inference path: ``model.eval()`` and no gradient tracking.
+    Decision rule: config ``faulty_cutoff`` (+ optional ``uncertain_low``
+    gate, TDD sec 5) — see ``decide_label``. Deterministic inference path:
+    ``model.eval()`` and no gradient tracking.
     """
     waveform = load_fixed_length_audio(
         path,
@@ -77,12 +104,11 @@ def predict_single_file(
 
     class_names = config["class_names"]
     probabilities = {name: float(p) for name, p in zip(class_names, probs)}
-    label = max(class_names, key=lambda name: probabilities[name])
-    # Config-driven decision threshold (TDD sec 5): with class-weighted CE the
-    # argmax (0.5) boundary is mis-calibrated for a ~92% Normal test set, so
-    # deployments should classify Faulty only above ``faulty_cutoff`` (e.g.
-    # 0.95). Absent a cutoff, fall back to argmax.
-    cutoff = config.get("faulty_cutoff")
-    if isinstance(cutoff, (int, float)):
-        label = class_names[1] if probabilities[class_names[1]] >= cutoff else class_names[0]
-    return Prediction(label=label, probabilities=probabilities)
+    label = decide_label(
+        probabilities,
+        class_names,
+        config.get("faulty_cutoff"),
+        config.get("uncertain_low"),
+    )
+    confidence = max(probabilities.values())
+    return Prediction(label=label, probabilities=probabilities, confidence=confidence)

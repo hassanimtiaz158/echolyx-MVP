@@ -12,6 +12,7 @@ Responsible for:
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,29 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from src.data.preprocess import Augment, load_fixed_length_audio
+
+
+def derive_group_key(path: Path) -> str:
+    """Machine/source group key for one clip path (grouped-split support).
+
+    MIMII DUE/DG clips carry a ``section_XX_source`` / ``section_XX_target``
+    token in the filename — the recording session/machine. Clips from the
+    same machine must never straddle train/val/test, or accuracy is
+    optimistic for unseen machines. DUE and DG archives are kept as separate
+    groups (different recording campaigns that happen to reuse section ids).
+    Non-MIMII clips (Freesound) are one group each (no known session).
+    """
+    s = str(path).replace("\\", "/")
+    m = re.search(r"section_\d+_(?:source|target)", s)
+    if m is None:
+        return f"fs:{path.stem}"
+    archive = "dg" if re.search(r"(fan_dg|/dg/|_dg)", s) else "due"
+    return f"{archive}:{m.group(0)}"
+
+
+def derive_group_keys(filepaths: list[Path]) -> list[str]:
+    """Group key per clip — feed to ``build_splits``/``make_dataloaders``."""
+    return [derive_group_key(p) for p in filepaths]
 
 
 @dataclass
@@ -64,22 +88,97 @@ class FanSoundDataset(Dataset):
         return waveform, self.labels[index]
 
 
+def _build_grouped_splits(
+    filepaths: list[Path],
+    labels: list[int],
+    groups: list[str],
+    seed: int,
+    train_frac: float,
+    val_frac: float,
+) -> tuple[Split, Split, Split]:
+    """70/15/15 split at the GROUP level (no group in more than one split).
+
+    Groups are partitioned by stratifying on their label composition
+    (``"mixed"`` for groups containing both classes, ``"single-<label>"``
+    otherwise), which keeps class balance across splits while guaranteeing
+    every split still contains both classes (mixed groups carry both).
+    """
+    if len(filepaths) != len(labels) or len(filepaths) != len(groups):
+        raise ValueError("filepaths, labels and groups must have equal length")
+
+    by_group: dict[str, list[tuple[Path, int]]] = {}
+    for fp, lbl, g in zip(filepaths, labels, groups):
+        by_group.setdefault(g, []).append((fp, lbl))
+
+    names = sorted(by_group)
+    if len(names) < 3:
+        raise ValueError(
+            "grouped split needs at least 3 distinct groups (machines/sources)"
+        )
+    strat = [
+        "mixed"
+        if len({lbl for _, lbl in by_group[g]}) > 1
+        else f"single-{next(lbl for _, lbl in by_group[g])}"
+        for g in names
+    ]
+
+    test_size = 1.0 - train_frac - val_frac
+    n_strat = len(set(strat))
+    test_count = max(int(round(test_size * len(names))), n_strat)
+    val_count = max(int(round(val_frac * len(names))), n_strat)
+    if test_count + val_count >= len(names):
+        raise ValueError("train_frac + val_frac too small for this group count")
+
+    idx = list(range(len(names)))
+    rem_idx, test_idx = train_test_split(
+        idx, test_size=test_count, stratify=strat,
+        random_state=seed, shuffle=True,
+    )
+    rem_strat = [strat[i] for i in rem_idx]
+    train_idx, val_idx = train_test_split(
+        rem_idx, test_size=val_count, stratify=rem_strat,
+        random_state=seed + 1, shuffle=True,
+    )
+
+    def _materialize(group_idx: list[int]) -> Split:
+        files: list[Path] = []
+        lbls: list[int] = []
+        for gi in group_idx:
+            for fp, lbl in by_group[names[gi]]:
+                files.append(fp)
+                lbls.append(lbl)
+        return Split(files, lbls)
+
+    return (
+        _materialize(train_idx),
+        _materialize(val_idx),
+        _materialize(test_idx),
+    )
+
+
 def build_splits(
     filepaths: list[Path],
     labels: list[int],
     seed: int = 42,
     train_frac: float = 0.70,
     val_frac: float = 0.15,
+    groups: list[str] | None = None,
 ) -> tuple[Split, Split, Split]:
-    """Stratified 70/15/15 train/val/test split (TDD sec 3.3).
+    """70/15/15 train/val/test split (TDD sec 3.3).
 
-    Uses ``sklearn.train_test_split`` twice: first reserve the 15% test
-    split, then split the remainder into train/val at ``val_frac`` of the
-    total. Both steps are stratified by label and seeded.
+    Per-clip stratified (default, TDD baseline) or, when ``groups`` is given,
+    **grouped**: every clip from the same machine/source (``derive_group_key``)
+    stays in one split, so test clips never share a recording session with
+    training clips — the honest accuracy for unseen machines.
 
-    Requires at least 2 samples per class (the stratified splitter needs a
-    representative for each class in every split).
+    The per-clip path uses ``sklearn.train_test_split`` twice (test first,
+    then train/val), both stratified by label and seeded. Requires at least 2
+    samples per class.
     """
+    if groups is not None:
+        return _build_grouped_splits(
+            filepaths, labels, groups, seed, train_frac, val_frac
+        )
     if len(filepaths) != len(labels):
         raise ValueError("filepaths and labels must have equal length")
     if not filepaths:
@@ -152,6 +251,7 @@ def make_dataloaders(
     num_workers: int = 0,
     seed: int = 42,
     balance_train: bool = False,
+    groups: list[str] | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, torch.Tensor]:
     """Build train (augmented), validation, and test DataLoaders.
 
@@ -159,9 +259,13 @@ def make_dataloaders(
     class weights are computed from the training split only (TDD 3.4).
     If ``balance_train``, the train loader draws with replacement using
     inverse-class-frequency weights, so the minority (Faulty) class is seen
-    every epoch instead of being swamped by Normal (TDD 3.4).
+    every epoch instead of being swamped by Normal (TDD 3.4). If ``groups``
+    is given, splits are built at the machine/source level (no clip from the
+    same recording session straddles splits) — see ``build_splits``.
     """
-    train_split, val_split, test_split = build_splits(filepaths, labels, seed=seed)
+    train_split, val_split, test_split = build_splits(
+        filepaths, labels, seed=seed, groups=groups
+    )
 
     train_ds = FanSoundDataset(
         train_split.filepaths, train_split.labels, sample_rate, num_samples, augment=True

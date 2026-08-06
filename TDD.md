@@ -58,6 +58,7 @@ Gradio UI (label + confidence)
 
 ### 3.3 Splitting
 - Stratified split: 70% train / 15% validation / 15% test, stratified by label to preserve class balance in each split.
+- **Grouped split (default with `group_by_source: true`)**: MIMII clips are contiguous 10 s segments of the same machine session, so a per-clip stratified split lets near-duplicates straddle train/test and overstates accuracy. `build_splits(..., groups=...)` instead splits at the machine/source level (`derive_group_key`: `section_XX_source|target` token, DUE and DG archives kept separate; Freesound clips are one group each), stratifying groups by their label composition. No clip from a machine seen in training appears in validation/test — the honest accuracy for unseen machines.
 - Fixed random seed (42) for reproducibility.
 
 ### 3.4 Class Imbalance Handling
@@ -95,7 +96,7 @@ Gradio UI (label + confidence)
 
 - **Metrics:** accuracy, precision, recall, F1 (binary, faulty=positive class), confusion matrix, and the **predicted-label distribution** (explicit majority-class-collapse check).
 - **Priority metric:** recall on the Faulty class — in a failure-prediction product, a missed fault (false negative) is more costly than a false alarm.
-- **Threshold tuning:** the P(Faulty) cutoff maximizing **validation** F1 is selected, then the test split is re-scored at that cutoff and reported separately (fights the argmax collapse that class imbalance induces even with weighted loss). The deployment decision rule is a config value `faulty_cutoff` (TDD 5.5): with ~92% Normal test data the class-weighted CE boundary sits far from 0.5, so production inference (`src/inference.predict_single_file`, shared by the Gradio demo) labels Faulty only above the configured cutoff (default 0.95) and Normal otherwise. When the config cutoff is set, `evaluate.py` validates it on the validation split and scores the test split at that exact point.
+- **Threshold tuning:** the P(Faulty) cutoff maximizing **validation** F1 is selected, then the test split is re-scored at that cutoff and reported separately (fights the argmax collapse that class imbalance induces even with weighted loss). The deployment decision rule is a config value `faulty_cutoff` (TDD 5.5): with ~92% Normal test data the class-weighted CE boundary sits far from 0.5, so production inference (`src/inference.predict_single_file`, shared by the Gradio demo) labels Faulty only above the configured cutoff (default 0.95) and Normal otherwise. When the config cutoff is set, `evaluate.py` validates it on the validation split and scores the test split at that exact point. An optional `uncertain_low` gate (TDD 5.5) converts the band `(uncertain_low, faulty_cutoff)` into an "Uncertain" answer — a demo "re-record" beats a confident wrong guess.
 - **Real-world sanity check:** run inference on the one real, non-training `fan's frame broken.mp3` clip; report result explicitly and honestly (whether correct or not) as the most credible single data point for investors.
 - **Real-world hold-out set:** every clip under `broken_fan_root` (real faulty consumer-fan recordings, never in training/test splits) is scored individually and reported as a per-clip table + detection count, kept strictly separate from aggregate metrics.
 - **Training curves:** loss/accuracy plots across both phases, saved as artifacts for the pitch deck.

@@ -58,6 +58,18 @@ def build_demo(config_path: str | Path) -> gr.Interface:
             logger.error("Prediction failed: %s", exc)
             raise gr.Error(f"Prediction failed: {exc}")
 
+    def hint() -> str:
+        low = cfg.get("uncertain_low")
+        high = cfg.get("faulty_cutoff")
+        gate = (
+            f"P(Faulty) between {low} and {high} is reported as 'Uncertain'."
+            if low is not None and high is not None
+            else "Decisions use P(Faulty) >= 0.5 (argmax)."
+        )
+        return (
+            f"Decision rule: Faulty when P(Faulty) >= {high}. {gate}"
+        )
+
     return gr.Interface(
         fn=classify,
         inputs=gr.Audio(
@@ -70,12 +82,10 @@ def build_demo(config_path: str | Path) -> gr.Interface:
             label="Prediction - Normal vs Faulty probabilities",
         ),
         title="Echolyx AI - Fan Anomaly Detector",
-        description=(
-            "Proof-of-concept demo: upload or record a ~10 s fan recording and get an "
-            "instant Normal vs Faulty readout with confidence. Echolyx AI uses PANNs "
-            "CNN14 transfer learning fine-tuned on real fan audio (see PRD/TDD). "
-            "This is a research prototype, not production monitoring."
-        ),
+        description="Proof-of-concept demo: upload or record a ~10 s fan recording for an "
+        "instant Normal vs Faulty readout with confidence. Echolyx AI uses PANNs "
+        "CNN14 transfer learning fine-tuned on real fan audio (see PRD/TDD). "
+        "Research prototype, not production monitoring.",
     )
 
 

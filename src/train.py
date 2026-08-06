@@ -42,7 +42,7 @@ import torch.nn.functional as F
 import yaml
 
 from src.data.collect import collect
-from src.data.dataset import make_dataloaders
+from src.data.dataset import derive_group_keys, make_dataloaders
 from src.models.transfer_cnn14 import TransferCnn14
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,8 @@ DEFAULTS = {
     "num_workers": 0,
     "mixup_alpha": 0.0,
     "balance_sampling": False,
+    "group_by_source": False,
+    "use_cosine": False,
     "phase1_epochs": 8,
     "phase1_lr": 1e-3,
     "phase2_epochs": 15,
@@ -175,6 +177,7 @@ def train_phase(
     history: list[dict],
     best_state: dict,
     cfg: dict,
+    scheduler=None,
 ) -> None:
     """Train one phase for ``epochs``, logging every epoch and saving best VT."""
     best_acc = best_state["val_acc"]
@@ -193,11 +196,13 @@ def train_phase(
             "train_acc": train_acc,
             "val_loss": val_loss,
             "val_acc": val_acc,
+"lr": optimizer.param_groups[0]["lr"],
         }
         history.append(record)
         logger.info(
-            "%s ep %2d | train loss %.4f acc %.4f | val loss %.4f acc %.4f",
+            "%s ep %2d | train loss %.4f acc %.4f | val loss %.4f acc %.4f | lr %.1e",
             phase_name, epoch, train_loss, train_acc, val_loss, val_acc,
+            optimizer.param_groups[0]["lr"],
         )
 
         if val_acc > best_acc:
@@ -218,6 +223,9 @@ def train_phase(
                 is_best=True,
             )
             logger.info("  -> new best val acc %.4f, checkpoint saved", val_acc)
+
+        if scheduler is not None:  # cosine decay warmed down through the phase
+            scheduler.step()
 
     # Keep the last phase's state so final.pt metadata is accurate.
     best_state["phase"] = phase_name
@@ -278,6 +286,7 @@ def main() -> None:
         raise RuntimeError("No training clips found — check data roots in config.yaml")
 
     num_samples = cfg["sample_rate"] * cfg["clip_seconds"]
+    groups = derive_group_keys(filepaths) if cfg.get("group_by_source", False) else None
     train_loader, val_loader, _, class_weights = make_dataloaders(
         filepaths,
         labels,
@@ -287,7 +296,10 @@ def main() -> None:
         num_workers=cfg["num_workers"],
         seed=cfg["seed"],
         balance_train=cfg.get("balance_sampling", False),
+        groups=groups,
     )
+    if groups is not None:
+        logger.info("Grouped splits by machine/source (%d groups)", len(set(groups)))
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
 
     # 2) Model (TDD sec 4).
@@ -315,9 +327,17 @@ def main() -> None:
     opt1 = torch.optim.Adam(
         model.param_groups("head", head_lr=cfg["phase1_lr"]), lr=cfg["phase1_lr"]
     )
+    sched1 = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt1, T_max=cfg["phase1_epochs"], eta_min=cfg["phase1_lr"] * 0.01
+        )
+        if cfg.get("use_cosine", False)
+        else None
+    )
     train_phase(
         model, "phase1", opt1, train_loader, val_loader, criterion, device,
         cfg["phase1_epochs"], checkpoint_dir, history, best_state, cfg,
+        scheduler=sched1,
     )
 
     # 4) Phase 2 — unfreeze last blocks, differential LR (TDD 4.3).
@@ -332,9 +352,17 @@ def main() -> None:
         ),
         lr=cfg["phase2_head_lr"],
     )
+    sched2 = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt2, T_max=cfg["phase2_epochs"], eta_min=cfg["phase2_head_lr"] * 0.01
+        )
+        if cfg.get("use_cosine", False)
+        else None
+    )
     train_phase(
         model, "phase2", opt2, train_loader, val_loader, criterion, device,
         cfg["phase2_epochs"], checkpoint_dir, history, best_state, cfg,
+        scheduler=sched2,
     )
 
     # 5) Artifacts: final model + JSON history for plotting.
