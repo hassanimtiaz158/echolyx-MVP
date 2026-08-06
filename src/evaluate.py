@@ -123,19 +123,28 @@ def report_threshold_tuned(
     test_loader,
     device: torch.device,
     class_names: list[str],
+    configured_cutoff: float | None = None,
 ) -> None:
     """Choose the Faulty cutoff on the VALIDATION split, then score the test split.
 
     Fights the argmax majority-class collapse: a model whose argmax is ~always
     Normal can still be usable if P(Faulty) separates the classes. The
     threshold maximizing validation F1 (Faulty = positive) is applied to test.
+    When ``configured_cutoff`` is set in config it is used as the operating
+    point (deployed rule, validated on the validation split) instead.
     """
     val_probs, val_labels = _collect_positive_probabilities(model, val_loader, device)
-    best_t, best_f1 = 0.5, -1.0
-    for t in np.arange(0.05, 0.96, 0.01):
-        _, _, _, f1 = _metrics_at_threshold(val_probs, val_labels, t)
-        if f1 > best_f1:
-            best_f1, best_t = f1, float(t)
+    if configured_cutoff is not None:
+        best_t = float(configured_cutoff)
+        _, _, _, best_f1 = _metrics_at_threshold(val_probs, val_labels, best_t)
+        source = f"config faulty_cutoff (validation F1 = {best_f1:.3f})"
+    else:
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.arange(0.05, 0.96, 0.01):
+            _, _, _, f1 = _metrics_at_threshold(val_probs, val_labels, t)
+            if f1 > best_f1:
+                best_f1, best_t = f1, float(t)
+        source = f"auto-tuned on validation (max Faulty F1 = {best_f1:.3f})"
 
     test_probs, test_labels = _collect_positive_probabilities(model, test_loader, device)
     acc, prec, rec, f1 = _metrics_at_threshold(test_probs, test_labels, best_t)
@@ -146,7 +155,7 @@ def report_threshold_tuned(
     print("=" * 60)
     print(f"THRESHOLD-TUNED METRICS (Faulty cutoff = P(Faulty) >= {best_t:.2f})")
     print("=" * 60)
-    print(f"cutoff selected on validation (max Faulty F1 = {best_f1:.3f})")
+    print(f"cutoff {source}")
     print(f"accuracy : {acc:.4f}")
     print(f"precision: {prec:.4f}")
     print(f"recall   : {rec:.4f}   <- priority metric (missed faults are costly)")
@@ -306,7 +315,10 @@ def evaluate(config_path: str | Path) -> None:
     report_test_metrics(preds, labels_arr, cfg["class_names"])
 
     # Threshold tuning: cutoff chosen on validation, scored on test (separate).
-    report_threshold_tuned(model, val_loader, test_loader, device, cfg["class_names"])
+    report_threshold_tuned(
+        model, val_loader, test_loader, device, cfg["class_names"],
+        configured_cutoff=cfg.get("faulty_cutoff"),
+    )
 
     # Artifacts.
     artifact_dir = Path(cfg["artifact_dir"])

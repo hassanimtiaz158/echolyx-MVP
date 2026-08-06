@@ -78,4 +78,11 @@ def predict_single_file(
     class_names = config["class_names"]
     probabilities = {name: float(p) for name, p in zip(class_names, probs)}
     label = max(class_names, key=lambda name: probabilities[name])
+    # Config-driven decision threshold (TDD sec 5): with class-weighted CE the
+    # argmax (0.5) boundary is mis-calibrated for a ~92% Normal test set, so
+    # deployments should classify Faulty only above ``faulty_cutoff`` (e.g.
+    # 0.95). Absent a cutoff, fall back to argmax.
+    cutoff = config.get("faulty_cutoff")
+    if isinstance(cutoff, (int, float)):
+        label = class_names[1] if probabilities[class_names[1]] >= cutoff else class_names[0]
     return Prediction(label=label, probabilities=probabilities)

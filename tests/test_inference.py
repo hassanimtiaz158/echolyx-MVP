@@ -82,6 +82,27 @@ def test_predict_single_file_shapes_and_probabilities(model_and_config, tmp_path
     assert pred.probabilities[pred.label] == max(pred.probabilities.values())
 
 
+def test_predict_respects_configured_cutoff(model_and_config, tmp_path):
+    model = model_and_config
+    audio = tmp_path / "clip.wav"
+    sf.write(audio, np.sin(2 * np.pi * 220 * np.arange(CLIP) / CNN14_SAMPLE_RATE).astype(np.float32), CNN14_SAMPLE_RATE)
+
+    # argmax label (baseline)
+    base = predict_single_file(audio, model, CONFIG)
+
+    # Extreme cutoffs flip the label deterministically: 0.0 -> always Faulty,
+    # 1.0 -> always Normal. This proves the decision rule is applied.
+    cfg_all_faulty = {**CONFIG, "faulty_cutoff": 0.0}
+    cfg_all_normal = {**CONFIG, "faulty_cutoff": 1.0}
+    assert predict_single_file(audio, model, cfg_all_faulty).label == "Faulty"
+    assert predict_single_file(audio, model, cfg_all_normal).label == "Normal"
+
+    # A cutoff at the argmax probability leaves the argmax decision unchanged.
+    p_argmax = base.probabilities[base.label]
+    cfg_same = {**CONFIG, "faulty_cutoff": p_argmax}
+    assert predict_single_file(audio, model, cfg_same).label == base.label
+
+
 def test_load_model_missing_checkpoint_raises(tmp_path):
     with pytest.raises(FileNotFoundError, match="Checkpoint not found"):
         load_model(tmp_path / "nope.pth", tmp_path / "nope.pth", num_classes=2)

@@ -135,7 +135,7 @@ Smoke-test the whole pipeline on tiny data with
 | Training curves | `artifacts/training_curves.png` | Train/val loss + accuracy across both phases |
 | Confusion matrix | `artifacts/confusion_matrix.png` | Test-split confusion matrix |
 | Training history | `artifacts/training_history.json` | Per-epoch loss/accuracy for both phases |
-| Metrics | stdout of `evaluate` | Accuracy, precision, recall, F1 (Faulty = positive class; recall is the priority metric), predicted-label distribution, threshold-tuned metrics (max-F1 cutoff on validation, applied to test), full `classification_report` + **REAL-WORLD HOLD-OUT CHECK** on `data/raw/broken_fans/`, reported separately and never mixed into aggregate metrics |
+| Metrics | stdout of `evaluate` | Accuracy, precision, recall, F1 (Faulty = positive class; recall is the priority metric), predicted-label distribution, operating-point metrics at the configured `faulty_cutoff` (validated on validation, scored on test; default 0.95), full `classification_report` + **REAL-WORLD HOLD-OUT CHECK** on `data/raw/broken_fans/`, reported separately and never mixed into aggregate metrics |
 
 ## Tests
 

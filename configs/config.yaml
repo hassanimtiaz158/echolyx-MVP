@@ -53,6 +53,14 @@ phase2_head_lr: 0.0001      # differential LR: head
 # unfreeze conv_block5+6+fc1 so the backbone can adapt toward fault signatures.
 phase2_unfreeze_blocks: 2
 
+# --- Deployment decision rule (TDD sec 5) ---
+# Class-weighted CE mis-calibrates the argmax boundary: with a ~92% Normal
+# test split, argmax collapses and under-reports accuracy. The operating
+# point is P(Faulty) >= faulty_cutoff, validated on the validation split by
+# evaluate.py and applied by inference + the Gradio demo. Auto-tune on
+# validation if commented out.
+faulty_cutoff: 0.95
+
 # --- Artifacts (TDD sec 7) ---
 checkpoint_dir: "checkpoints"   # best.pt / final model (+ metadata: sample rate, clip length, class names)
 artifact_dir: "artifacts"       # training curves, confusion matrix plot, evaluation report
