@@ -65,6 +65,7 @@ DEFAULTS = {
     "phase2_backbone_lr": 1e-5,
     "phase2_head_lr": 1e-4,
     "phase2_unfreeze_blocks": 1,
+    "use_class_weights": True,
 }
 
 
@@ -94,6 +95,26 @@ def load_config(path: str | Path) -> dict:
         str(Path(cfg["checkpoint_dir"]) / BACKBONE_FILENAME),
     )
     return cfg
+
+
+def build_criterion(
+    class_weights: torch.Tensor,
+    use_class_weights: bool,
+    device: torch.device,
+) -> nn.CrossEntropyLoss:
+    """Build the training criterion (TDD sec 3.4 + recipe hardening).
+
+    ``use_class_weights=True`` (default): class-weighted CE with weights
+    ``total/(2*count)``. ``use_class_weights=False``: plain CE — rebalancing
+    then comes from the sampler alone (``balance_sampling``). Weighting BOTH
+    the sampler and the loss double-counts the minority class: with ~8%
+    Faulty in the pool and weak cross-machine signal, that 11x loss pressure
+    collapses the model into "always Faulty" (seen in run 2). The flag makes
+    the two rebalancing mechanisms mutually exclusive.
+    """
+    if use_class_weights:
+        return nn.CrossEntropyLoss(weight=class_weights.to(device))
+    return nn.CrossEntropyLoss()
 
 
 def _mixup_batch(
@@ -300,7 +321,18 @@ def main() -> None:
     )
     if groups is not None:
         logger.info("Grouped splits by machine/source (%d groups)", len(set(groups)))
-    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    use_class_weights = cfg.get("use_class_weights", True)
+    criterion = build_criterion(class_weights, use_class_weights, device)
+    if use_class_weights:
+        logger.info(
+            "Loss: class-weighted CE (weights=%s)",
+            [round(w, 4) for w in class_weights.tolist()],
+        )
+    else:
+        # Rebalance via the sampler only (balance_sampling), NOT the loss:
+        # weighting both double-counts the minority and collapses the model
+        # toward the minority when cross-machine signal is weak.
+        logger.info("Loss: plain CE (rebalance via balance_sampling sampler only)")
 
     # 2) Model (TDD sec 4).
     model = TransferCnn14(

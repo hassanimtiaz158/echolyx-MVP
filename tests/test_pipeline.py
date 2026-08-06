@@ -79,6 +79,20 @@ def test_get_class_weights():
     assert torch.allclose(weights, torch.tensor([2.0 / 3.0, 2.0]))
 
 
+def test_build_criterion():
+    from src.train import build_criterion
+
+    device = torch.device("cpu")
+    weights = torch.tensor([0.5, 2.0])
+    weighted = build_criterion(weights, use_class_weights=True, device=device)
+    # Weighted CE -> the weight tensor is attached and matches.
+    assert weighted.weight is not None
+    assert torch.allclose(weighted.weight, weights)
+    # Plain CE (sampler-only rebalancing) -> no weight in the loss.
+    plain = build_criterion(weights, use_class_weights=False, device=device)
+    assert plain.weight is None
+
+
 def test_build_splits_stratified():
     # 40 files, 20 per class -> exact 70/15/15 = 28/6/6 (no rounding drift).
     files = [Path(f"fake/{i}.wav") for i in range(40)]

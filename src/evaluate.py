@@ -85,8 +85,11 @@ def report_test_metrics(preds: np.ndarray, labels: np.ndarray, class_names: list
     print()
     print(classification_report(labels, preds, target_names=class_names, digits=3, zero_division=0))
     dist = Counter(preds.tolist())
-    print(f"predicted-label distribution: {dict(dist)} (majority-class collapse shows "
-          "as ~all Normal)")
+    collapsed = next((cls for cls, n in dist.items() if n / max(len(preds), 1) >= 0.9), None)
+    hint = ""
+    if collapsed is not None:
+        hint = f"collapsed to ~all {class_names[collapsed] if collapsed < len(class_names) else collapsed}"
+    print(f"predicted-label distribution: {dict(dist)} ({hint})")
 
 
 def _collect_positive_probabilities(

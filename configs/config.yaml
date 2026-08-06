@@ -32,6 +32,13 @@ mixup_alpha: 0.2
 # balance_sampling: oversample the minority (Faulty) class with replacement so
 # it is present every epoch (TDD 3.4). Default ON.
 balance_sampling: true
+# Rebalance the minority via the SAMPLER only (plain CE in the loss).
+# Class-weighting BOTH the sampler and the loss double-counts the minority:
+# its per-class weight total/(2*count) ~= 11x the majority here, and that
+# + weak cross-machine signal collapsed run 2 into "always Faulty"
+# (acc 0.048, 1093-of-1096 Faulty, a MIMII-vs-Freesound shortcut). Set true
+# to restore class-weighted CE when the data/recipe warrant it.
+use_class_weights: false
 
 # --- Split strategy (TDD sec 3.3) ---
 # Per-clip stratified split (false) overestimates accuracy: MIMII clips are
