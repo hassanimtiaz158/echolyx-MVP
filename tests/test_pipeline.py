@@ -93,6 +93,25 @@ def test_build_criterion():
     assert plain.weight is None
 
 
+def test_probe_split_separates_synthetic_clusters():
+    from src.diagnose import probe_split
+
+    rng = np.random.default_rng(7)
+    # Two well-separated 16-d clusters: normal near origin, faulty far away.
+    train_normal = rng.normal(0.0, 0.2, size=(300, 16))
+    train_faulty = rng.normal(3.0, 0.2, size=(60, 16))
+    test_normal = rng.normal(0.0, 0.2, size=(60, 16))
+    test_faulty = rng.normal(3.0, 0.2, size=(15, 16))
+    train_emb = np.vstack([train_normal, train_faulty])
+    train_labels = np.array([0] * 300 + [1] * 60)
+    test_emb = np.vstack([test_normal, test_faulty])
+    test_labels = np.array([0] * 60 + [1] * 15)
+
+    result = probe_split(train_emb, train_labels, test_emb, test_labels, seed=42)
+    assert result["auc"] > 0.95
+    assert result["recall"] >= 0.9
+
+
 def test_build_splits_stratified():
     # 40 files, 20 per class -> exact 70/15/15 = 28/6/6 (no rounding drift).
     files = [Path(f"fake/{i}.wav") for i in range(40)]

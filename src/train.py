@@ -248,10 +248,6 @@ def train_phase(
         if scheduler is not None:  # cosine decay warmed down through the phase
             scheduler.step()
 
-    # Keep the last phase's state so final.pt metadata is accurate.
-    best_state["phase"] = phase_name
-    best_state["epoch"] = epochs
-
 
 def _save_checkpoint(
     model: nn.Module,
@@ -397,8 +393,13 @@ def main() -> None:
         scheduler=sched2,
     )
 
-    # 5) Artifacts: final model + JSON history for plotting.
-    _save_checkpoint(model, best_state, cfg, checkpoint_dir / "final.pt", is_best=False)
+    # 5) Artifacts: final model + JSON history for plotting. final.pt carries
+    # the last-epoch state (not the best) so its metadata matches the weights;
+    # the log line reports the true best (phase/epoch of the best val acc).
+    final_state = dict(best_state)
+    final_state["phase"] = "phase2"
+    final_state["epoch"] = cfg["phase2_epochs"]
+    _save_checkpoint(model, final_state, cfg, checkpoint_dir / "final.pt", is_best=False)
 
     (artifact_dir / "training_history.json").write_text(
         json.dumps({"best": dict(best_state), "epochs": history}, indent=2),
