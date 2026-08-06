@@ -207,6 +207,36 @@ def _clip_labels(clips: list[Clip]) -> np.ndarray:
     return np.asarray([1 if c.is_faulty else 0 for c in clips], dtype=int)
 
 
+def fit_gmm_detector(
+    pca: PCA, train_embs: np.ndarray, n_components: int = 4
+) -> "GaussianMixture":
+    """Fit a multi-mode Gaussian mixture on the PCA'd normal cloud.
+
+    MIMII normal audio is inherently multi-modal (RPM / blade harmonics,
+    gear whine, airflow) — a single Gaussian cannot capture those several
+    healthy modes, so any fault living in a low-density *valley between*
+    two normal modes is under-separated. A small GMM fits them jointly.
+
+    ``n_components`` is clamped to the number of available (PCA-reduced)
+    samples. Returns the fitted model; ``score_gmm`` scores clips on it.
+    """
+    from sklearn.mixture import GaussianMixture
+
+    n_samples = len(train_embs)
+    n_components = max(1, min(n_components, n_samples))
+    gm = GaussianMixture(
+        n_components=n_components, covariance_type="full",
+        random_state=0, reg_covar=1e-4,
+    )
+    gm.fit(pca.transform(train_embs))
+    return gm
+
+
+def score_gmm(gm: "GaussianMixture", pca: PCA, embs: np.ndarray) -> np.ndarray:
+    """Negative log-likelihood of each clip under the normal GMM (distance)."""
+    return -gm.score_samples(pca.transform(embs))
+
+
 def run_anomaly(config_path: str | Path) -> dict:
     """Per-machine anomaly detection; returns per-machine results dict."""
     cfg = load_config(config_path)
@@ -223,6 +253,8 @@ def run_anomaly(config_path: str | Path) -> dict:
         num_classes=cfg["num_classes"],
         freeze_base=True,
     ).to(device)
+    gmm_components = int(cfg.get("anomaly_gmm_components", 4))
+    logger.info("GMM density with %d components", gmm_components)
 
     results: dict[str, dict] = {}
     for machine, machine_clips in sorted(by_machine.items()):
@@ -240,74 +272,89 @@ def run_anomaly(config_path: str | Path) -> dict:
             cfg["sample_rate"], cfg["sample_rate"] * cfg["clip_seconds"],
         )
         pca, var = fit_machine_detector(train_embs)
+        gm = fit_gmm_detector(pca, train_embs, n_components=gmm_components)
         test_embs = _extract_embeddings(
             model, [c.path for c in test_pool], device,
             cfg["sample_rate"], cfg["sample_rate"] * cfg["clip_seconds"],
         )
-        scores = score_clips(pca, var, test_embs)
+        scores_mahal = score_clips(pca, var, test_embs)
+        scores_gmm = score_gmm(gm, pca, test_embs)
         labels = _clip_labels(test_pool)
 
-        auc = roc_auc_score(labels, scores) if len(set(labels)) > 1 else float("nan")
+        auc_mahal = roc_auc_score(labels, scores_mahal) if len(set(labels)) > 1 else float("nan")
+        auc_gmm = roc_auc_score(labels, scores_gmm) if len(set(labels)) > 1 else float("nan")
         results[machine] = {
             "machine": machine,
             "n_train_normal": len(train_norm),
             "n_test_pool": len(test_pool),
             "n_faulty": int(labels.sum()),
-            "auc": float(auc),
-            "scores": scores.tolist(),
+            "auc_mahalanobis": float(auc_mahal),
+            "auc_gmm": float(auc_gmm),
+            "scores_mahalanobis": scores_mahal.tolist(),
+            "scores_gmm": scores_gmm.tolist(),
             "labels": labels.tolist(),
             "files": [str(c.path.name) for c in test_pool],
         }
 
-    aucs = [r["auc"] for r in results.values() if not np.isnan(r["auc"])]
+    rows = [r for r in results.values() if "auc_gmm" in r]
+    aucs = [r["auc_mahalanobis"] for r in rows if not np.isnan(r["auc_mahalanobis"])]
+    gmm_aucs = [r["auc_gmm"] for r in rows if not np.isnan(r["auc_gmm"])]
     results["_summary"] = {
         "n_machines": len(aucs),
-        "mean_auc": float(np.mean(aucs)) if aucs else None,
+        "mean_auc_mahalanobis": float(np.mean(aucs)) if aucs else None,
+        "mean_auc_gmm": float(np.mean(gmm_aucs)) if gmm_aucs else None,
     }
     return results
 
 
 def _print_table(results: dict) -> None:
     print("=" * 60)
-    print("PER-MACHINE ANOMALY DETECTION (Mahalanobis on frozen embeddings)")
+    print("PER-MACHINE ANOMALY DETECTION (Mahalanobis vs GMM, frozen embeddings)")
     print("=" * 60)
-    header = f"{'machine':<28} {'trainN':>6} {'pool':>5} {'faulty':>6} {'AUC':>7}"
+    header = f"{'machine':<28} {'trainN':>6} {'faulty':>6} {'MahalAUC':>9} {'GMMAUC':>8}"
     print(header)
     for key, r in sorted(results.items()):
         if key == "_summary":
             continue
-        auc = "  n/a " if np.isnan(r["auc"]) else f"{r['auc']:.4f}"
+        mahal = "  n/a " if np.isnan(r["auc_mahalanobis"]) else f"{r['auc_mahalanobis']:.4f}"
+        gmm = "  n/a " if np.isnan(r["auc_gmm"]) else f"{r['auc_gmm']:.4f}"
         print(
-            f"{r['machine']:<28} {r['n_train_normal']:>6} {r['n_test_pool']:>5} "
-            f"{r['n_faulty']:>6} {auc:>7}"
+            f"{r['machine']:<28} {r['n_train_normal']:>6} {r['n_faulty']:>6} "
+            f"{mahal:>9} {gmm:>8}"
         )
     s = results.get("_summary", {})
     print("-" * 60)
-    if s.get("mean_auc") is not None:
-        print(f"mean AUC over {s['n_machines']} machines: {s['mean_auc']:.4f}")
+    if s.get("mean_auc_mahalanobis") is not None:
+        print(f"mean AUC over {s['n_machines']} machines:")
+        print(f"  Mahalanobis: {s['mean_auc_mahalanobis']:.4f}   GMM: {s['mean_auc_gmm']:.4f}")
         print("(DCASE-2022 metric; 0.5 = chance, 1.0 = perfect separation)")
     print()
     print("Reading: each machine's model is fit on ITS OWN normal audio only.")
-    print("An AUC near 0.5 means the frozen embeddings cannot separate this")
-    print("machine's faults from its healthy sound; the next step is a")
-    print("per-machine normal-only fine-tune of the backbone (DCASE 2022's")
-    print("few-shot source-adaptation recipe), not more global tuning.")
+    print("GMM wins => multi-modal healthy sound; expect fault valleys filled by")
+    print("a 4-component fit. Both near 0.5 => frozen AudioSet features are too")
+    print("coarse; next is per-machine normal-only fine-tune of the backbone.")
 
 
 def save_auc_plot(results: dict, path: Path) -> None:
-    """Bar chart of per-machine AUC (NaN machines omitted)."""
-    rows = [r for k, r in sorted(results.items()) if k != "_summary" and not np.isnan(r["auc"])]
+    """Bar chart of per-machine AUC, Mahalanobis vs GMM (NaN rows omitted)."""
+    rows = [r for k, r in sorted(results.items())
+            if k != "_summary" and not np.isnan(r["auc_mahalanobis"])]
     if not rows:
         logger.warning("No AUCs to plot — skipping %s", path)
         return
     fig, ax = plt.subplots(figsize=(10, 4))
     names = [r["machine"] for r in rows]
-    aucs = [r["auc"] for r in rows]
-    ax.bar(names, aucs, color="#4C72B0")
+    x = np.arange(len(names))
+    w = 0.38
+    ax.bar(x - w / 2, [r["auc_mahalanobis"] for r in rows], w,
+           label="Mahalanobis", color="#4C72B0")
+    ax.bar(x + w / 2, [r["auc_gmm"] for r in rows], w,
+           label="GMM", color="#DD8452")
     ax.axhline(0.5, color="red", linestyle="--", label="chance")
+    ax.set_xticks(x, names)
     ax.set_ylim(0, 1)
     ax.set_ylabel("AUC")
-    ax.set_title("Per-machine anomaly AUC (frozen PANNs embeddings + Mahalanobis)")
+    ax.set_title("Per-machine anomaly AUC (frozen PANNs embeddings)")
     ax.tick_params(axis="x", rotation=45, labelsize=7)
     ax.legend()
     fig.tight_layout()

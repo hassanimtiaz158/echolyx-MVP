@@ -132,6 +132,21 @@ def test_mahalanobis_detector_separates_synthetic_clouds():
     assert scores_anomaly.mean() > scores_normal.mean() * 4
 
 
+def test_gmm_detector_separates_synthetic_clouds():
+    from src.anomaly import fit_gmm_detector, score_gmm
+
+    rng = np.random.default_rng(5)
+    normal = rng.normal(0.0, 0.2, size=(500, 128))
+    anomaly = rng.normal(3.0, 0.3, size=(50, 128))
+    pca, _ = fit_machine_detector(normal, n_components=32)
+    gm = fit_gmm_detector(pca, normal, n_components=3)
+    scores_normal = score_gmm(gm, pca, normal[:60])
+    scores_anomaly = score_gmm(gm, pca, anomaly)
+    # Negative log-likelihood: anomalies sit in low-density tails.
+    assert scores_anomaly.mean() > scores_normal.mean() + 3.0
+    assert scores_anomaly.min() > scores_normal.max()
+
+
 def test_run_anomaly_end_to_end(tmp_path: Path):
     pytest.importorskip(
         "torchlibrosa",
@@ -180,6 +195,13 @@ def test_run_anomaly_end_to_end(tmp_path: Path):
     # DG has no target/test pool in the factory -> skipped (not in results).
     assert "dg:fan_dg:section_00" not in results
     assert results["_summary"]["n_machines"] >= 2
+    section = results["due:fan:section_00"]
+    # Both density models produce scores + AUCs (fields renamed after GMM).
+    assert len(section["scores_mahalanobis"]) == len(section["labels"])
+    assert len(section["scores_gmm"]) == len(section["labels"])
+    assert "auc_mahalanobis" in section and "auc_gmm" in section
+    assert results["_summary"]["mean_auc_mahalanobis"] is not None
+    assert results["_summary"]["mean_auc_gmm"] is not None
 
 
 def test_machine_id_archives_mirror_derive_group_key():
