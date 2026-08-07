@@ -68,7 +68,7 @@ DEFAULTS = {
     "phase2_head_lr": 5e-5,
     "phase2_unfreeze_blocks": 2,
     "use_class_weights": False,
-    "use_focal_loss": True,
+    "use_focal_loss": False,
     "use_attention_head": True,
     "grad_accum_steps": 2,
 }

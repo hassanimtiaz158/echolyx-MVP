@@ -37,9 +37,14 @@ balance_mixup: true
 balance_sampling: true
 
 # --- Loss function ---
-# Focal Loss handles 11:1 class imbalance much better than plain CE.
-# Alpha=0.25 down-weights easy (majority) examples, gamma=2.0 focuses on hard cases.
-use_focal_loss: true
+# balance_sampling already redraws every train batch close to 50/50 (Faulty
+# oversampled by inverse-class-frequency weights). Focal Loss's alpha/gamma
+# further down-weight easy majority examples on top of that already-balanced
+# batch, which pushed the trained model to over-predict Faulty (eval_run1:
+# raw argmax predicted 470/726 clips Faulty on a test split that is ~8%
+# Faulty). Use ONE imbalance-correction mechanism, not two: keep the sampler,
+# use plain CE so the loss doesn't also fight the natural class prior.
+use_focal_loss: false
 # Class-weighted CE (alternative): disabled to avoid double-counting with sampler.
 use_class_weights: false
 
