@@ -63,6 +63,12 @@ _MII = re.compile(
     r"(?P<label>normal|anomaly)_"
 )
 
+# Original MIMII / DCASE2020 Task 2 filename token, e.g.
+#   normal_id_00_00000000.wav / anomaly_id_00_00000000.wav
+# Predates the source/target domain-shift concept (one domain only) and the
+# train/test split is implied by the parent directory, not the filename.
+_DCASE2020 = re.compile(r"^(?P<label>normal|anomaly)_id_(?P<section>\d+)_")
+
 
 @dataclass(frozen=True)
 class Clip:
@@ -92,12 +98,16 @@ def _archive_of(machine_dir_name: str) -> str:
 
 
 def parse_mimii_clips(root: str | Path) -> list[Clip]:
-    """Walk ``root`` and parse every MIMII DUE/DG wav into a ``Clip``.
+    """Walk ``root`` and parse every MIMII DUE/DG/DCASE2020 wav into a ``Clip``.
 
-    The machine id fuses the inventory token (due/dg), the machine-name
-    directory directly under ``root`` (``fan`` / ``fan_dg``), and the
-    ``section_XX`` id — so distinct machines never collide. Files whose
-    names do not match the MIMII token regex are skipped with a warning.
+    The machine id fuses the inventory token (due/dg/dcase2020), the
+    machine-name directory directly under ``root`` (``fan`` / ``fan_dg`` /
+    whatever DCASE2020 fan folder is mounted as), and the section/id number —
+    so distinct machines never collide. DCASE2020/original-MIMII clips (no
+    source/target domain-shift concept) get ``domain="source"`` and their
+    split comes from the parent directory name, since the filename itself
+    doesn't carry it. Files matching neither token regex are skipped with a
+    warning.
     """
     root = Path(root)
     if not root.is_dir():
@@ -105,20 +115,38 @@ def parse_mimii_clips(root: str | Path) -> list[Clip]:
     clips: list[Clip] = []
     for wav in _walk(root, {".wav"}):
         m = _MII.search(wav.name)
-        if m is None:
-            logger.warning("Skipping non-MIMII wav: %s", wav.name)
-            continue
-        machine_name = str(wav.relative_to(root).parts[0])
-        machine = f"{_archive_of(machine_name)}:{machine_name}:section_{m.group('section')}"
-        clips.append(
-            Clip(
-                path=wav,
-                machine=machine,
-                domain=m.group("domain"),
-                split=m.group("split"),
-                label=m.group("label"),
+        if m is not None:
+            machine_name = str(wav.relative_to(root).parts[0])
+            machine = f"{_archive_of(machine_name)}:{machine_name}:section_{m.group('section')}"
+            clips.append(
+                Clip(
+                    path=wav,
+                    machine=machine,
+                    domain=m.group("domain"),
+                    split=m.group("split"),
+                    label=m.group("label"),
+                )
             )
-        )
+            continue
+        m2 = _DCASE2020.match(wav.name)
+        if m2 is not None:
+            parts_lower = {p.lower() for p in wav.parts}
+            split = "train" if "train" in parts_lower else "test" if "test" in parts_lower else None
+            if split is None:
+                logger.warning("DCASE2020 wav with no train/test ancestor dir: %s", wav.name)
+                continue
+            machine = f"dcase2020:fan:id_{m2.group('section')}"
+            clips.append(
+                Clip(
+                    path=wav,
+                    machine=machine,
+                    domain="source",
+                    split=split,
+                    label=m2.group("label"),
+                )
+            )
+            continue
+        logger.warning("Skipping non-MIMII wav: %s", wav.name)
     clips.sort(key=lambda c: str(c.path))
     return clips
 
@@ -147,8 +175,17 @@ def machine_train_normal(clips: list[Clip]) -> list[Clip]:
 
 
 def machine_test_pool(clips: list[Clip]) -> list[Clip]:
-    """The scored pool for one machine: target/test clips (both classes)."""
-    return [c for c in clips if c.split == "test" and c.domain == "target"]
+    """The scored pool for one machine: target/test clips (both classes).
+
+    Falls back to source/test when a machine has no target domain at all —
+    original MIMII/DCASE2020 clips predate the domain-shift concept and only
+    ever have a single "source" domain, so this keeps them scoreable without
+    changing behavior for DUE/DG machines that do have target-domain data.
+    """
+    target_test = [c for c in clips if c.split == "test" and c.domain == "target"]
+    if target_test:
+        return target_test
+    return [c for c in clips if c.split == "test" and c.domain == "source"]
 
 
 def _extract_embeddings(

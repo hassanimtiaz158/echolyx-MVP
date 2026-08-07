@@ -32,14 +32,20 @@ def derive_group_key(path: Path) -> str:
     same machine must never straddle train/val/test, or accuracy is
     optimistic for unseen machines. DUE and DG archives are kept as separate
     groups (different recording campaigns that happen to reuse section ids).
-    Non-MIMII clips (Freesound) are one group each (no known session).
+    Original MIMII / DCASE2020 clips carry an ``id_XX`` token instead (no
+    source/target domain-shift concept) and are grouped by that id, tagged
+    ``dcase2020`` so they never collide with a DUE/DG section id. Non-MIMII
+    clips (Freesound) are one group each (no known session).
     """
     s = str(path).replace("\\", "/")
     m = re.search(r"section_\d+_(?:source|target)", s)
-    if m is None:
-        return f"fs:{path.stem}"
-    archive = "dg" if re.search(r"(fan_dg|/dg/|_dg)", s) else "due"
-    return f"{archive}:{m.group(0)}"
+    if m is not None:
+        archive = "dg" if re.search(r"(fan_dg|/dg/|_dg)", s) else "due"
+        return f"{archive}:{m.group(0)}"
+    m2 = re.search(r"^(?:normal|anomaly)_(id_\d+)_", path.name)
+    if m2 is not None:
+        return f"dcase2020:{m2.group(1)}"
+    return f"fs:{path.stem}"
 
 
 def derive_group_keys(filepaths: list[Path]) -> list[str]:

@@ -43,18 +43,27 @@ LABEL_FAULTY = 1
 SANITY_SUBSTRING = "broken"
 
 
-# MIMII DUE filenames embed the label, e.g.
+# MIMII DUE/DG filenames embed the label, e.g.
 # section_00_source_train_normal_0000_spd_1.wav -> "normal"
 MIMII_LABEL_RE = re.compile(r"_(normal|anomaly)_")
 
+# Original MIMII / DCASE2020 Task 2 filenames use a different convention,
+# e.g. normal_id_00_00000000.wav / anomaly_id_00_00000000.wav -> label is a
+# leading token, not a substring flanked by underscores on both sides.
+DCASE2020_LABEL_RE = re.compile(r"^(normal|anomaly)_id_\d+_")
+
 
 def _label_from_filename(wav_path: Path) -> int | None:
-    """Derive the label from the MIMII DUE filename (TDD sec 3.1).
+    """Derive the label from the filename (TDD sec 3.1).
 
-    Matches the ``_normal_`` / ``_anomaly_`` substrings. Returns ``None``
-    for files matching neither so they can be skipped with a warning.
+    Tries the MIMII DUE/DG convention (``_normal_``/``_anomaly_`` substring)
+    first, then the older MIMII/DCASE2020 convention (``normal_id_XX_...`` /
+    ``anomaly_id_XX_...`` leading token). Returns ``None`` for files matching
+    neither so they can be skipped with a warning.
     """
     match = MIMII_LABEL_RE.search(wav_path.name)
+    if match is None:
+        match = DCASE2020_LABEL_RE.match(wav_path.name)
     if match is None:
         return None
     return LABEL_NORMAL if match.group(1) == "normal" else LABEL_FAULTY
