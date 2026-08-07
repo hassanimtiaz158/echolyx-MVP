@@ -69,6 +69,12 @@ _MII = re.compile(
 # train/test split is implied by the parent directory, not the filename.
 _DCASE2020 = re.compile(r"^(?P<label>normal|anomaly)_id_(?P<section>\d+)_")
 
+# Raw MIMII 2019 directory layout, e.g. fan/id_00/abnormal/00000000.wav --
+# the filename is just a sequence number; label comes from the immediate
+# parent folder ("normal"/"abnormal", note: "abnormal" not "anomaly") and the
+# machine id from the grandparent folder ("id_00").
+_MIMII_RAW_ID_DIR = re.compile(r"^id_(?P<section>\d+)$")
+
 
 @dataclass(frozen=True)
 class Clip:
@@ -98,16 +104,19 @@ def _archive_of(machine_dir_name: str) -> str:
 
 
 def parse_mimii_clips(root: str | Path) -> list[Clip]:
-    """Walk ``root`` and parse every MIMII DUE/DG/DCASE2020 wav into a ``Clip``.
+    """Walk ``root`` and parse every MIMII DUE/DG/DCASE2020/raw-MIMII wav into a ``Clip``.
 
     The machine id fuses the inventory token (due/dg/dcase2020), the
     machine-name directory directly under ``root`` (``fan`` / ``fan_dg`` /
     whatever DCASE2020 fan folder is mounted as), and the section/id number —
     so distinct machines never collide. DCASE2020/original-MIMII clips (no
-    source/target domain-shift concept) get ``domain="source"`` and their
-    split comes from the parent directory name, since the filename itself
-    doesn't carry it. Files matching neither token regex are skipped with a
-    warning.
+    source/target domain-shift concept) get ``domain="source"``. Three
+    filename/layout conventions are recognized: DUE/DG (``section_XX_source_
+    train_normal_...``), DCASE2020-flattened (``normal_id_00_...wav``, split
+    from the parent dir), and raw MIMII 2019 (``id_00/{normal,abnormal}/
+    00000000.wav``, split inferred as train=normal/test=abnormal since that
+    layout has no predefined split). Files matching none of these are
+    skipped with a warning.
     """
     root = Path(root)
     if not root.is_dir():
@@ -143,6 +152,25 @@ def parse_mimii_clips(root: str | Path) -> list[Clip]:
                     domain="source",
                     split=split,
                     label=m2.group("label"),
+                )
+            )
+            continue
+        label_dir = wav.parent.name.lower()
+        id_dir_match = _MIMII_RAW_ID_DIR.match(wav.parent.parent.name.lower())
+        if id_dir_match is not None and label_dir in ("normal", "abnormal"):
+            machine = f"dcase2020:fan:id_{id_dir_match.group('section')}"
+            clips.append(
+                Clip(
+                    path=wav,
+                    machine=machine,
+                    domain="source",
+                    # No predefined split in this layout: normal clips feed
+                    # the per-machine training pool, abnormal clips are
+                    # scored (machine_test_pool folds them into whatever
+                    # test pool that machine already has, e.g. from
+                    # dc2020task2 if that's also attached).
+                    split="train" if label_dir == "normal" else "test",
+                    label="normal" if label_dir == "normal" else "anomaly",
                 )
             )
             continue

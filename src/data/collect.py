@@ -54,19 +54,35 @@ DCASE2020_LABEL_RE = re.compile(r"^(normal|anomaly)_id_\d+_")
 
 
 def _label_from_filename(wav_path: Path) -> int | None:
-    """Derive the label from the filename (TDD sec 3.1).
+    """Derive the label from the filename or, failing that, the parent folder.
 
-    Tries the MIMII DUE/DG convention (``_normal_``/``_anomaly_`` substring)
-    first, then the older MIMII/DCASE2020 convention (``normal_id_XX_...`` /
-    ``anomaly_id_XX_...`` leading token). Returns ``None`` for files matching
-    neither so they can be skipped with a warning.
+    Tries, in order:
+    1. MIMII DUE/DG convention (``_normal_``/``_anomaly_`` substring).
+    2. MIMII/DCASE2020 flattened convention (``normal_id_XX_...`` /
+       ``anomaly_id_XX_...`` leading token).
+    3. Original MIMII raw directory layout, e.g.
+       ``fan/id_00/{normal,abnormal}/00000000.wav`` -- the filename itself is
+       just a sequence number, so the label comes from the immediate parent
+       directory name instead (note: this layout says "abnormal", not
+       "anomaly").
+
+    Returns ``None`` if none of these match, so the file can be skipped with
+    a warning.
     """
     match = MIMII_LABEL_RE.search(wav_path.name)
-    if match is None:
-        match = DCASE2020_LABEL_RE.match(wav_path.name)
-    if match is None:
-        return None
-    return LABEL_NORMAL if match.group(1) == "normal" else LABEL_FAULTY
+    if match is not None:
+        return LABEL_NORMAL if match.group(1) == "normal" else LABEL_FAULTY
+
+    match = DCASE2020_LABEL_RE.match(wav_path.name)
+    if match is not None:
+        return LABEL_NORMAL if match.group(1) == "normal" else LABEL_FAULTY
+
+    parent = wav_path.parent.name.lower()
+    if parent == "normal":
+        return LABEL_NORMAL
+    if parent == "abnormal":
+        return LABEL_FAULTY
+    return None
 
 
 def _walk(root: Path, suffixes: set[str]):

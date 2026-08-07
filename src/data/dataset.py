@@ -33,9 +33,15 @@ def derive_group_key(path: Path) -> str:
     optimistic for unseen machines. DUE and DG archives are kept as separate
     groups (different recording campaigns that happen to reuse section ids).
     Original MIMII / DCASE2020 clips carry an ``id_XX`` token instead (no
-    source/target domain-shift concept) and are grouped by that id, tagged
-    ``dcase2020`` so they never collide with a DUE/DG section id. Non-MIMII
-    clips (Freesound) are one group each (no known session).
+    source/target domain-shift concept) — either in the filename
+    (``normal_id_00_...wav``) or as a path component (the raw MIMII layout,
+    ``fan/id_00/{normal,abnormal}/00000000.wav``) — and are grouped by that
+    id, tagged ``dcase2020`` regardless of which of the two layouts it came
+    from. That's deliberate: both are widely believed to repackage the same
+    underlying 2019 MIMII fan recordings, so sharing one group per id_XX
+    means a clip that's a byte-identical duplicate across two different
+    downloads can never straddle train/test even if it is. Non-MIMII clips
+    (Freesound) are one group each (no known session).
     """
     s = str(path).replace("\\", "/")
     m = re.search(r"section_\d+_(?:source|target)", s)
@@ -45,6 +51,9 @@ def derive_group_key(path: Path) -> str:
     m2 = re.search(r"^(?:normal|anomaly)_(id_\d+)_", path.name)
     if m2 is not None:
         return f"dcase2020:{m2.group(1)}"
+    m3 = re.search(r"/(id_\d+)/", s)
+    if m3 is not None:
+        return f"dcase2020:{m3.group(1)}"
     return f"fs:{path.stem}"
 
 
