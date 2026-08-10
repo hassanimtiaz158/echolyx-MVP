@@ -257,6 +257,36 @@ def get_class_weights(labels: list[int]) -> torch.Tensor:
     return weights
 
 
+def get_sampling_weights(labels: list[int], power: float = 1.0) -> torch.Tensor:
+    """Per-sample ``WeightedRandomSampler`` weights, softened by ``power``.
+
+    ``power=1.0`` is exact inverse-class-frequency weighting: every class is
+    drawn with equal probability per batch (full 50/50 for binary) -- this
+    was the sole ``balance_sampling`` behavior and it over-corrects once the
+    real class ratio isn't extreme anymore: the model trains on an
+    artificial 50/50 prior, then has to be recalibrated back down to the
+    true (much more Normal-heavy) test-time prior, and in practice that
+    recalibration doesn't fully happen (eval logs show argmax predicting
+    Faulty on ~83% of a test split that's only ~20% actually Faulty).
+
+    ``power=0.0`` gives every sample equal weight -- natural class
+    frequency, the sampler has no rebalancing effect. Values in between
+    interpolate: the minority class is still oversampled (so it isn't
+    swamped and forgotten), just not all the way to artificial parity.
+    """
+    if not labels:
+        return torch.empty(0, dtype=torch.float64)
+    counts = Counter(labels)
+    num_classes = max(labels) + 1
+    total = len(labels)
+    class_weight = torch.zeros(num_classes, dtype=torch.float64)
+    for cls in range(num_classes):
+        count = counts.get(cls, 0)
+        if count > 0:
+            class_weight[cls] = (total / count) ** power
+    return torch.tensor([class_weight[l].item() for l in labels], dtype=torch.float64)
+
+
 def make_dataloaders(
     filepaths: list[Path],
     labels: list[int],
@@ -267,16 +297,20 @@ def make_dataloaders(
     seed: int = 42,
     balance_train: bool = False,
     groups: list[str] | None = None,
+    sampling_power: float = 1.0,
 ) -> tuple[DataLoader, DataLoader, DataLoader, torch.Tensor]:
     """Build train (augmented), validation, and test DataLoaders.
 
     Returns ``(train_loader, val_loader, test_loader, class_weights)`` where
     class weights are computed from the training split only (TDD 3.4).
     If ``balance_train``, the train loader draws with replacement using
-    inverse-class-frequency weights, so the minority (Faulty) class is seen
-    every epoch instead of being swamped by Normal (TDD 3.4). If ``groups``
-    is given, splits are built at the machine/source level (no clip from the
-    same recording session straddles splits) — see ``build_splits``.
+    ``sampling_power``-softened inverse-class-frequency weights (see
+    ``get_sampling_weights``), so the minority (Faulty) class is seen more
+    often without necessarily forcing an artificial 50/50 batch prior
+    (``sampling_power=1.0`` reproduces that full-parity behavior; lower
+    values soften it). If ``groups`` is given, splits are built at the
+    machine/source level (no clip from the same recording session straddles
+    splits) — see ``build_splits``.
     """
     train_split, val_split, test_split = build_splits(
         filepaths, labels, seed=seed, groups=groups
@@ -294,10 +328,7 @@ def make_dataloaders(
 
     sampler = None
     if balance_train:
-        weights = get_class_weights(train_split.labels)
-        sample_weights = torch.tensor(
-            [weights[l].item() for l in train_split.labels], dtype=torch.double
-        )
+        sample_weights = get_sampling_weights(train_split.labels, power=sampling_power)
         sampler = WeightedRandomSampler(
             sample_weights, num_samples=len(sample_weights), replacement=True
         )

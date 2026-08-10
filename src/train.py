@@ -57,6 +57,7 @@ DEFAULTS = {
     "num_workers": 0,
     "mixup_alpha": 0.2,
     "balance_sampling": True,
+    "sampling_power": 0.5,
     "balance_mixup": True,
     "group_by_source": True,
     "use_cosine": True,
@@ -366,6 +367,7 @@ def main() -> None:
         seed=cfg["seed"],
         balance_train=cfg.get("balance_sampling", False),
         groups=groups,
+        sampling_power=cfg.get("sampling_power", 1.0),
     )
     if groups is not None:
         logger.info("Grouped splits by machine/source (%d groups)", len(set(groups)))

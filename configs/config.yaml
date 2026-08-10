@@ -35,6 +35,16 @@ balance_mixup: true
 
 # Balance the minority (Faulty) class with WeightedRandomSampler.
 balance_sampling: true
+# Soften the sampler instead of full 50/50 parity: with the DCASE2020/raw-
+# MIMII additions the Faulty share is now ~20% (was ~8%), and full parity
+# was over-correcting -- the model learned an artificial 50/50 prior and
+# never recalibrated back down, so it predicted Faulty on ~83% of a test
+# split that's only ~20% actually Faulty (accuracy 0.2955, precision 0.198).
+# power=1.0 reproduces the old full-parity behavior; power=0.0 disables
+# rebalancing entirely (natural frequency). 0.5 (sqrt inverse-frequency)
+# still oversamples the minority so it isn't swamped, without forcing the
+# artificial 50/50 batch prior that caused the over-correction.
+sampling_power: 0.5
 
 # --- Loss function ---
 # balance_sampling already redraws every train batch close to 50/50 (Faulty
