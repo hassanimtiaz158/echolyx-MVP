@@ -79,12 +79,12 @@ backbone_checkpoint: "checkpoints/Cnn14_mAP=0.431.pth"
 
 # --- Two-phase fine-tuning (TDD sec 4.3) ---
 # Phase 1: longer warmup with lower LR to stabilize head training
-phase1_epochs: 3
+phase1_epochs: 15
 phase1_lr: 0.0005
 phase1_warmup_epochs: 3
 
 # Phase 2: longer training with very low LR for stable fine-tuning
-phase2_epochs: 3
+phase2_epochs: 25
 phase2_backbone_lr: 0.000005    # very low for backbone stability
 phase2_head_lr: 0.00005         # moderate for head adaptation
 phase2_unfreeze_blocks: 2   # conv_block5+6+fc1 for feature adaptation
