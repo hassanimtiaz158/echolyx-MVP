@@ -48,10 +48,13 @@ from src.train import load_config, set_seed
 logger = logging.getLogger(__name__)
 
 MAX_TRAIN_VECTORS = 150_000  # cap per machine, memory/time guard
-EPOCHS = 20
+EPOCHS = 60
 BATCH_SIZE = 512
 LR = 1e-3
 CLIP_BATCH = 32  # clips per log-mel extraction batch
+VAL_FRACTION = 0.1
+HIDDEN = 256
+BOTTLENECK = 20
 
 
 def _clip_context_vectors(
@@ -77,26 +80,45 @@ def _clip_context_vectors(
 def train_machine_autoencoder(
     train_vectors: torch.Tensor, device: torch.device, seed: int
 ) -> DenseAutoencoder:
-    """Fit one autoencoder on a machine's pooled normal context vectors."""
+    """Fit one autoencoder on a machine's pooled normal context vectors.
+
+    Holds out ``VAL_FRACTION`` of the (capped) pool as a validation slice —
+    still normal-only audio, just unseen during weight updates — and keeps
+    the best-val-loss epoch's weights rather than whatever epoch training
+    happens to end on. Trains for ``EPOCHS`` with cosine LR decay: the
+    initial 20-epoch/fixed-LR recipe was still visibly improving at the
+    final epoch for most machines (underfit, not overfit), so more capacity
+    (``HIDDEN``/``BOTTLENECK``) and more training time are the first levers.
+    """
+    g = torch.Generator().manual_seed(seed)
     if train_vectors.shape[0] > MAX_TRAIN_VECTORS:
-        g = torch.Generator().manual_seed(seed)
         idx = torch.randperm(train_vectors.shape[0], generator=g)[:MAX_TRAIN_VECTORS]
         train_vectors = train_vectors[idx]
 
-    mean = train_vectors.mean(dim=0, keepdim=True)
-    std = train_vectors.std(dim=0, keepdim=True) + 1e-6
-    normed = (train_vectors - mean) / std
+    n = train_vectors.shape[0]
+    perm = torch.randperm(n, generator=g)
+    n_val = max(1, int(n * VAL_FRACTION))
+    val_vectors = train_vectors[perm[:n_val]]
+    fit_vectors = train_vectors[perm[n_val:]]
 
-    model = DenseAutoencoder().to(device)
+    mean = fit_vectors.mean(dim=0, keepdim=True)
+    std = fit_vectors.std(dim=0, keepdim=True) + 1e-6
+    fit_normed = (fit_vectors - mean) / std
+    val_normed = ((val_vectors - mean) / std).to(device)
+
+    model = DenseAutoencoder(hidden=HIDDEN, bottleneck=BOTTLENECK).to(device)
     model.mean = mean.to(device)  # stashed on the module for scoring-time normalization
     model.std = std.to(device)
 
-    loader = DataLoader(TensorDataset(normed), batch_size=BATCH_SIZE, shuffle=True)
+    loader = DataLoader(TensorDataset(fit_normed), batch_size=BATCH_SIZE, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
     loss_fn = nn.MSELoss()
 
-    model.train()
+    best_val = float("inf")
+    best_state = None
     for epoch in range(1, EPOCHS + 1):
+        model.train()
         total_loss = 0.0
         n_batches = 0
         for (batch,) in loader:
@@ -108,9 +130,23 @@ def train_machine_autoencoder(
             optimizer.step()
             total_loss += loss.item()
             n_batches += 1
-        if epoch == 1 or epoch % 5 == 0 or epoch == EPOCHS:
-            logger.info("  epoch %2d/%d  train_mse=%.5f", epoch, EPOCHS, total_loss / max(n_batches, 1))
+        scheduler.step()
 
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(val_normed), val_normed).item()
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+        if epoch == 1 or epoch % 10 == 0 or epoch == EPOCHS:
+            logger.info(
+                "  epoch %2d/%d  train_mse=%.5f  val_mse=%.5f  best_val=%.5f",
+                epoch, EPOCHS, total_loss / max(n_batches, 1), val_loss, best_val,
+            )
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
     model.eval()
     return model
 
