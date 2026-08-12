@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import ResultPanel from "@/app/components/ResultPanel";
+import Header from "@/app/components/Header";
+import DiagnosticsPanel from "@/app/components/DiagnosticsPanel";
 import { ApiError, classifyAudio, type Prediction } from "@/lib/api";
+import { analyzeAudio, decodeAudio, type AudioMetrics } from "@/lib/audioAnalysis";
 
 type Status = "idle" | "recording" | "analyzing" | "done" | "error";
 
@@ -11,6 +13,7 @@ export default function Home() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [prediction, setPrediction] = useState<Prediction | null>(null);
+  const [metrics, setMetrics] = useState<AudioMetrics | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -19,6 +22,7 @@ export default function Home() {
 
   const resetClip = useCallback((blob: Blob, name: string) => {
     setPrediction(null);
+    setMetrics(null);
     setError(null);
     setStatus("idle");
     setClip((prev) => {
@@ -67,8 +71,12 @@ export default function Home() {
     setStatus("analyzing");
     setError(null);
     try {
-      const result = await classifyAudio(clip.blob, clip.name);
+      const [result, decoded] = await Promise.all([
+        classifyAudio(clip.blob, clip.name),
+        decodeAudio(clip.blob),
+      ]);
       setPrediction(result);
+      setMetrics(analyzeAudio(decoded.samples, decoded.sampleRate));
       setStatus("done");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong analyzing that clip.");
@@ -80,33 +88,53 @@ export default function Home() {
   const isAnalyzing = status === "analyzing";
 
   return (
-    <div className="relative flex flex-1 flex-col overflow-hidden">
-      {/* Ambient background */}
-      <div className="pointer-events-none absolute inset-0 -z-10">
-        <div className="absolute left-1/2 top-[-10%] h-[36rem] w-[36rem] -translate-x-1/2 rounded-full bg-sky-500/20 blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-5%] h-[28rem] w-[28rem] rounded-full bg-indigo-500/10 blur-[120px]" />
-      </div>
+    <div className="flex flex-1 flex-col">
+      <Header />
 
-      <header className="mx-auto w-full max-w-3xl px-6 pt-14 pb-8 text-center">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-sky-500/15 ring-1 ring-sky-400/30">
-          <span className="text-2xl">🌀</span>
+      {/* Hero */}
+      <section className="relative overflow-hidden border-b border-[var(--border-soft)]">
+        <div
+          className="pointer-events-none absolute inset-0 -z-10"
+          style={{
+            background:
+              "radial-gradient(600px 300px at 50% -10%, var(--accent-soft), transparent 70%)",
+          }}
+        />
+        <div className="mx-auto max-w-3xl px-6 py-20 text-center">
+          <p className="font-display text-xs font-semibold tracking-[0.3em] text-[var(--accent)]">
+            ACOUSTIC FAULT DIAGNOSTICS
+          </p>
+          <h1 className="mt-4 text-balance font-display text-4xl font-bold leading-tight text-[var(--text)] sm:text-5xl">
+            Hear a fault before it
+            <br />
+            <span style={{ color: "var(--accent)" }}>becomes a failure.</span>
+          </h1>
+          <p className="mx-auto mt-5 max-w-xl text-balance text-[var(--text-dim)]">
+            Upload or record ~10 seconds of fan audio. A PANNs CNN14 transfer-learning model,
+            fine-tuned on real industrial fan recordings, returns an instant diagnostic —
+            waveform, spectrogram, and anomaly score included.
+          </p>
+          <a
+            href="#demo"
+            className="mt-8 inline-flex items-center gap-2 rounded-full bg-[var(--accent)] px-7 py-3 font-display text-sm font-semibold tracking-wide text-[#03181c] shadow-[0_0_28px_var(--accent-glow)] transition-transform hover:scale-105"
+          >
+            LAUNCH DEMO
+          </a>
+          <p className="mt-4 text-xs text-[var(--text-faint)]">
+            Proof-of-concept — not a production monitoring system.
+          </p>
         </div>
-        <h1 className="text-3xl font-semibold tracking-tight text-slate-50 sm:text-4xl">
-          Echolyx AI
-        </h1>
-        <p className="mt-2 text-balance text-slate-400">
-          Point a microphone at a fan — get an instant{" "}
-          <span className="text-emerald-300">Normal</span> vs{" "}
-          <span className="text-rose-300">Faulty</span> read.
-        </p>
-        <p className="mt-1 text-xs text-slate-500">
-          Proof-of-concept demo · PANNs CNN14 transfer learning · not a production monitoring system
-        </p>
-      </header>
+      </section>
 
-      <main className="mx-auto w-full max-w-3xl flex-1 px-6 pb-16">
-        <div className="grid gap-6 sm:grid-cols-2">
-          {/* Upload / drop zone */}
+      {/* Demo / diagnostics console */}
+      <main id="demo" className="mx-auto w-full max-w-3xl flex-1 px-6 py-14">
+        <p className="font-display text-xs font-semibold tracking-[0.14em] text-[var(--text-dim)]">
+          DIAGNOSTIC CONSOLE
+        </p>
+        <h2 className="mt-1 font-display text-2xl font-bold text-[var(--text)]">Analyze Fan Audio</h2>
+        <p className="mt-1 text-sm text-[var(--text-dim)]">Upload a clip or record from your microphone.</p>
+
+        <div className="mt-6 grid gap-4 sm:grid-cols-2">
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -119,13 +147,19 @@ export default function Home() {
               onFilePicked(e.dataTransfer.files?.[0] ?? null);
             }}
             onClick={() => fileInputRef.current?.click()}
-            className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${
-              dragOver ? "border-sky-400 bg-sky-400/5" : "border-white/15 hover:border-white/25 hover:bg-white/5"
-            }`}
+            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed p-8 text-center transition-colors"
+            style={{
+              borderColor: dragOver ? "var(--accent)" : "var(--border)",
+              background: dragOver ? "var(--accent-soft)" : "var(--surface)",
+            }}
           >
-            <span className="text-3xl">📁</span>
-            <p className="text-sm font-medium text-slate-200">Upload a clip</p>
-            <p className="text-xs text-slate-500">wav / mp3 · drag &amp; drop or click</p>
+            <span className="text-3xl" aria-hidden="true">
+              ↑
+            </span>
+            <p className="font-display text-sm font-semibold text-[var(--text)]">
+              Drop audio file here or click to browse
+            </p>
+            <p className="text-xs text-[var(--text-dim)]">Supports WAV, MP3, FLAC · 5–30 seconds</p>
             <input
               ref={fileInputRef}
               type="file"
@@ -135,33 +169,38 @@ export default function Home() {
             />
           </div>
 
-          {/* Record */}
           <button
             type="button"
             onClick={isRecording ? stopRecording : startRecording}
-            className={`flex flex-col items-center justify-center gap-2 rounded-2xl border-2 p-8 text-center transition-colors ${
-              isRecording
-                ? "border-rose-400/60 bg-rose-400/10"
-                : "border-dashed border-white/15 hover:border-white/25 hover:bg-white/5"
-            }`}
+            className="flex flex-col items-center justify-center gap-2 rounded-2xl border-2 p-8 text-center transition-colors"
+            style={{
+              borderColor: isRecording ? "var(--critical)" : "var(--border)",
+              borderStyle: isRecording ? "solid" : "dashed",
+              background: isRecording ? "var(--critical-soft)" : "var(--surface)",
+            }}
           >
-            <span className={`text-3xl ${isRecording ? "animate-pulse" : ""}`}>
-              {isRecording ? "⏹️" : "🎙️"}
+            <span className={`text-3xl ${isRecording ? "animate-pulse" : ""}`} aria-hidden="true">
+              {isRecording ? "■" : "●"}
             </span>
-            <p className="text-sm font-medium text-slate-200">
+            <p className="font-display text-sm font-semibold text-[var(--text)]">
               {isRecording ? "Stop recording" : "Record from mic"}
             </p>
-            <p className="text-xs text-slate-500">~10s of fan sound works best</p>
+            <p className="text-xs text-[var(--text-dim)]">~10s of fan sound works best</p>
           </button>
         </div>
 
         {clip && (
-          <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="mt-5 rounded-2xl border border-[var(--border-soft)] bg-[var(--surface)] p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="text-xl">🎧</span>
+                <span
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm"
+                  style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
+                >
+                  ♪
+                </span>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-slate-200">{clip.name}</p>
+                  <p className="truncate text-sm font-medium text-[var(--text)]">{clip.name}</p>
                   <audio src={clip.url} controls className="mt-1 h-8 w-64 max-w-full" />
                 </div>
               </div>
@@ -169,7 +208,7 @@ export default function Home() {
                 type="button"
                 onClick={analyze}
                 disabled={isAnalyzing}
-                className="shrink-0 rounded-xl bg-sky-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/20 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
+                className="shrink-0 rounded-full bg-[var(--accent)] px-6 py-2.5 font-display text-sm font-semibold tracking-wide text-[#03181c] shadow-[0_0_20px_var(--accent-glow)] transition-transform hover:scale-105 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
               >
                 {isAnalyzing ? "Analyzing…" : "Analyze"}
               </button>
@@ -178,19 +217,22 @@ export default function Home() {
         )}
 
         {error && (
-          <div className="mt-6 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          <div
+            className="mt-5 rounded-xl border px-4 py-3 text-sm"
+            style={{ borderColor: "var(--critical)", background: "var(--critical-soft)", color: "#ffb4c2" }}
+          >
             {error}
           </div>
         )}
 
-        {prediction && (
+        {prediction && metrics && (
           <div className="mt-6">
-            <ResultPanel prediction={prediction} />
+            <DiagnosticsPanel prediction={prediction} metrics={metrics} />
           </div>
         )}
       </main>
 
-      <footer className="mx-auto w-full max-w-3xl px-6 pb-10 text-center text-xs leading-relaxed text-slate-600">
+      <footer className="mx-auto w-full max-w-3xl px-6 pb-10 text-center text-xs leading-relaxed text-[var(--text-faint)]">
         Research prototype, not a production monitoring system. Trained on the MIMII fan dataset;
         results may not generalize to arbitrary fans or machinery. Binary classification only —
         no fault localization.

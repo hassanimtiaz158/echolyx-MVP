@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist, Geist_Mono, Rajdhani } from "next/font/google";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,19 +12,25 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const rajdhani = Rajdhani({
+  variable: "--font-rajdhani",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+});
+
 export const metadata: Metadata = {
-  title: "Echolyx AI — Fan Anomaly Detector",
+  title: "Echolyx AI — Acoustic Fault Diagnostics",
   description:
-    "Proof-of-concept dashboard: upload or record a fan sound and get an instant Normal vs Faulty read, powered by PANNs CNN14 transfer learning.",
+    "Upload or record a fan sound and get an instant Normal vs Faulty diagnostic read, powered by PANNs CNN14 transfer learning.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} ${rajdhani.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-slate-950 text-slate-100">
+      <body className="min-h-full flex flex-col bg-[var(--bg)] text-[var(--text)]">
         {children}
       </body>
     </html>

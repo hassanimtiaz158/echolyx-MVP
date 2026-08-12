@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
+/*
+  ECHOLYX diagnostics console — deliberately single-theme (dark). This is a
+  always-on instrument panel, not a document; committing to one dark visual
+  world matches the brand (echolyxai.com) rather than inverting it.
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #070a10;
+  --bg-raised: #0c1119;
+  --surface: #10151f;
+  --surface-2: #151b28;
+  --border: #212938;
+  --border-soft: #1a2130;
+
+  --text: #eef2f7;
+  --text-dim: #8792a6;
+  --text-faint: #4c5568;
+
+  --accent: #22d3ee;
+  --accent-soft: rgba(34, 211, 238, 0.12);
+  --accent-glow: rgba(34, 211, 238, 0.35);
+
+  --healthy: #2ee6a6;
+  --healthy-soft: rgba(46, 230, 166, 0.12);
+  --stressed: #f5a623;
+  --stressed-soft: rgba(245, 166, 35, 0.12);
+  --critical: #ff5470;
+  --critical-soft: rgba(255, 84, 112, 0.12);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-display: var(--font-rajdhani);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+.font-display {
+  font-family: var(--font-rajdhani), var(--font-geist-sans), sans-serif;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
