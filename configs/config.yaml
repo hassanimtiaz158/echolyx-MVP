@@ -69,7 +69,7 @@ grad_accum_steps: 2
 # --- Split strategy (TDD sec 3.3) ---
 group_by_source: true  # honest accuracy for unseen machines
 
-# --- LR schedule (TDD sec 4.3) ---
+# --- LR schedule (TDD sec 4.3) 
 use_cosine: true
 
 # --- Model / transfer learning (TDD sec 4) ---
