@@ -151,16 +151,33 @@ def train_machine_autoencoder(
     return model
 
 
+AGGREGATIONS = ("mean", "p90", "p95", "max")
+
+
 @torch.no_grad()
-def score_clip_vectors(model: DenseAutoencoder, vectors: torch.Tensor, device: torch.device) -> float:
-    """Mean per-vector reconstruction MSE for one clip's context vectors."""
+def score_clip_vectors(
+    model: DenseAutoencoder, vectors: torch.Tensor, device: torch.device
+) -> dict[str, float]:
+    """Per-clip anomaly score under several aggregations of per-frame MSE.
+
+    Plain ``mean`` dilutes a short/localized fault (e.g. a brief rattle)
+    across a mostly-normal 10s clip. ``p90``/``p95``/``max`` instead ask "how
+    bad does this clip's WORST moment look", which should be more sensitive
+    to intermittent faults — computed together here so one training run lets
+    us compare all four instead of guessing which aggregation to commit to.
+    """
     if vectors.shape[0] == 0:
-        return float("nan")
+        return {agg: float("nan") for agg in AGGREGATIONS}
     vectors = vectors.to(device)
     normed = (vectors - model.mean) / model.std
     recon = model(normed)
-    mse = ((recon - normed) ** 2).mean(dim=1)
-    return float(mse.mean().item())
+    mse = ((recon - normed) ** 2).mean(dim=1).cpu().numpy()  # per-frame MSE
+    return {
+        "mean": float(mse.mean()),
+        "p90": float(np.percentile(mse, 90)),
+        "p95": float(np.percentile(mse, 95)),
+        "max": float(mse.max()),
+    }
 
 
 def run(config_path: str | Path) -> dict:
@@ -197,50 +214,68 @@ def run(config_path: str | Path) -> dict:
         test_vec_list = _clip_context_vectors(
             [c.path for c in test_pool], logmel_extractor, num_samples, device
         )
-        scores = np.array([score_clip_vectors(model, v, device) for v in test_vec_list])
+        score_dicts = [score_clip_vectors(model, v, device) for v in test_vec_list]
         labels = _clip_labels(test_pool)
 
-        valid = ~np.isnan(scores)
-        auc = (
-            roc_auc_score(labels[valid], scores[valid])
-            if valid.sum() and len(set(labels[valid])) > 1
-            else float("nan")
-        )
+        per_agg_scores = {agg: np.array([d[agg] for d in score_dicts]) for agg in AGGREGATIONS}
+        valid = ~np.isnan(per_agg_scores["mean"])
+        per_agg_auc = {}
+        for agg in AGGREGATIONS:
+            s = per_agg_scores[agg]
+            per_agg_auc[agg] = (
+                float(roc_auc_score(labels[valid], s[valid]))
+                if valid.sum() and len(set(labels[valid])) > 1
+                else float("nan")
+            )
+
         results[machine] = {
             "machine": machine,
             "n_train_normal": len(train_norm),
             "n_test_pool": len(test_pool),
             "n_faulty": int(labels.sum()),
-            "auc": float(auc),
-            "scores": scores.tolist(),
+            "auc": per_agg_auc,
+            "scores": {agg: per_agg_scores[agg].tolist() for agg in AGGREGATIONS},
             "labels": labels.tolist(),
             "files": [str(c.path.name) for c in test_pool],
         }
 
-    rows = [r for r in results.values()]
-    aucs = [r["auc"] for r in rows if not np.isnan(r["auc"])]
-    results["_summary"] = {
-        "n_machines": len(aucs),
-        "mean_auc": float(np.mean(aucs)) if aucs else None,
-    }
+    rows = list(results.values())
+    summary: dict[str, object] = {"n_machines": len(rows)}
+    for agg in AGGREGATIONS:
+        aucs = [r["auc"][agg] for r in rows if not np.isnan(r["auc"][agg])]
+        summary[f"mean_auc_{agg}"] = float(np.mean(aucs)) if aucs else None
+    results["_summary"] = summary
     return results
 
 
 def _print_table(results: dict) -> None:
     print("=" * 60)
-    print("PER-MACHINE LOG-MEL AUTOENCODER (reconstruction-error anomaly score)")
+    print("PER-MACHINE LOG-MEL AUTOENCODER (reconstruction-error, 4 score aggregations)")
     print("=" * 60)
-    print(f"{'machine':<28} {'trainN':>6} {'faulty':>6} {'AUC':>8}")
+    header = f"{'machine':<28} {'trainN':>6} {'faulty':>6}"
+    for agg in AGGREGATIONS:
+        header += f" {agg:>8}"
+    print(header)
     for key, r in sorted(results.items()):
         if key == "_summary":
             continue
-        auc = "  n/a " if np.isnan(r["auc"]) else f"{r['auc']:.4f}"
-        print(f"{r['machine']:<28} {r['n_train_normal']:>6} {r['n_faulty']:>6} {auc:>8}")
+        row = f"{r['machine']:<28} {r['n_train_normal']:>6} {r['n_faulty']:>6}"
+        for agg in AGGREGATIONS:
+            v = r["auc"][agg]
+            row += f" {'  n/a ' if np.isnan(v) else f'{v:.4f}':>8}"
+        print(row)
     s = results.get("_summary", {})
     print("-" * 60)
-    if s.get("mean_auc") is not None:
-        print(f"mean AUC over {s['n_machines']} machines: {s['mean_auc']:.4f}")
-        print("(DCASE metric; 0.5 = chance, 1.0 = perfect separation)")
+    best_agg, best_mean = None, -1.0
+    for agg in AGGREGATIONS:
+        m = s.get(f"mean_auc_{agg}")
+        if m is not None:
+            print(f"mean AUC ({agg:<4}) over {s['n_machines']} machines: {m:.4f}")
+            if m > best_mean:
+                best_agg, best_mean = agg, m
+    print("(DCASE metric; 0.5 = chance, 1.0 = perfect separation)")
+    if best_agg is not None:
+        print(f"\n-> best aggregation: {best_agg} (mean AUC {best_mean:.4f})")
     print()
     print("Reading: each autoencoder is trained from scratch on ONE machine's")
     print("own normal log-mel spectrograms — no pretrained backbone. Compare")
@@ -248,21 +283,27 @@ def _print_table(results: dict) -> None:
 
 
 def save_auc_plot(results: dict, path: Path) -> None:
-    rows = [r for k, r in sorted(results.items()) if k != "_summary" and not np.isnan(r["auc"])]
+    rows = [r for k, r in sorted(results.items()) if k != "_summary"]
+    rows = [r for r in rows if not all(np.isnan(v) for v in r["auc"].values())]
     if not rows:
         logger.warning("No AUCs to plot — skipping %s", path)
         return
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(11, 4.5))
     names = [r["machine"] for r in rows]
     x = np.arange(len(names))
-    ax.bar(x, [r["auc"] for r in rows], color="#55A868")
-    ax.axhline(0.5, color="red", linestyle="--", label="chance")
+    n_agg = len(AGGREGATIONS)
+    w = 0.8 / n_agg
+    colors = ["#55A868", "#4C72B0", "#C44E52", "#DD8452"]
+    for i, agg in enumerate(AGGREGATIONS):
+        vals = [r["auc"][agg] for r in rows]
+        ax.bar(x + (i - (n_agg - 1) / 2) * w, vals, w, label=agg, color=colors[i % len(colors)])
+    ax.axhline(0.5, color="black", linestyle="--", linewidth=1, label="chance")
     ax.set_xticks(x, names)
     ax.set_ylim(0, 1)
     ax.set_ylabel("AUC")
-    ax.set_title("Per-machine log-mel autoencoder AUC")
+    ax.set_title("Per-machine log-mel autoencoder AUC by score aggregation")
     ax.tick_params(axis="x", rotation=45, labelsize=7)
-    ax.legend()
+    ax.legend(fontsize=8)
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
