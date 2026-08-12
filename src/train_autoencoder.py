@@ -37,6 +37,7 @@ from src.anomaly import (
     parse_mimii_clips,
 )
 from src.data.preprocess import load_fixed_length_audio
+from src.models.conv_autoencoder import ConvAutoencoder
 from src.models.dense_autoencoder import (
     LOGMEL_SAMPLE_RATE,
     DenseAutoencoder,
@@ -55,6 +56,12 @@ CLIP_BATCH = 32  # clips per log-mel extraction batch
 VAL_FRACTION = 0.1
 HIDDEN = 256
 BOTTLENECK = 20
+
+# Conv model uses whole-clip spectrograms (far fewer samples per machine than
+# the dense model's per-window pool), so fewer, larger batches and more
+# epochs to reach a comparable number of gradient updates.
+CONV_EPOCHS = 80
+CONV_BATCH_SIZE = 32
 
 
 def _clip_context_vectors(
@@ -180,11 +187,119 @@ def score_clip_vectors(
     }
 
 
-def run(config_path: str | Path) -> dict:
+def _clip_spectrograms(
+    clip_paths: list[Path],
+    logmel_extractor: LogMelExtractor,
+    num_samples: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Whole-clip log-mel spectrograms, batched: (n_clips, 1, T, mel_bins).
+
+    Unlike ``_clip_context_vectors`` (windowed, for the dense model), this
+    keeps each clip as one 2D image — every clip has the same fixed sample
+    count, so T is identical across clips and they stack directly.
+    """
+    logmel_extractor.eval()
+    out: list[torch.Tensor] = []
+    for start in range(0, len(clip_paths), CLIP_BATCH):
+        batch_paths = clip_paths[start : start + CLIP_BATCH]
+        waveforms = torch.stack(
+            [load_fixed_length_audio(p, LOGMEL_SAMPLE_RATE, num_samples) for p in batch_paths]
+        ).to(device)
+        logmel = logmel_extractor(waveforms)  # (batch, time, mel_bins)
+        out.append(logmel.unsqueeze(1).cpu())  # (batch, 1, time, mel_bins)
+    return torch.cat(out, dim=0)
+
+
+def train_machine_conv_autoencoder(
+    train_spectrograms: torch.Tensor, device: torch.device, seed: int
+) -> ConvAutoencoder:
+    """Fit one ConvAutoencoder on a machine's normal-only spectrograms.
+
+    Same held-out-validation / cosine-LR / best-checkpoint pattern as
+    ``train_machine_autoencoder``, just on whole-clip spectrograms instead of
+    windowed context vectors.
+    """
+    g = torch.Generator().manual_seed(seed)
+    n = train_spectrograms.shape[0]
+    perm = torch.randperm(n, generator=g)
+    n_val = max(1, int(n * VAL_FRACTION))
+    val_specs = train_spectrograms[perm[:n_val]]
+    fit_specs = train_spectrograms[perm[n_val:]]
+
+    mean = fit_specs.mean()
+    std = fit_specs.std() + 1e-6
+    fit_normed = (fit_specs - mean) / std
+    val_normed = ((val_specs - mean) / std).to(device)
+
+    model = ConvAutoencoder().to(device)
+    model.mean = mean.to(device)
+    model.std = std.to(device)
+
+    loader = DataLoader(TensorDataset(fit_normed), batch_size=CONV_BATCH_SIZE, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CONV_EPOCHS)
+    loss_fn = nn.MSELoss()
+
+    best_val = float("inf")
+    best_state = None
+    for epoch in range(1, CONV_EPOCHS + 1):
+        model.train()
+        total_loss = 0.0
+        n_batches = 0
+        for (batch,) in loader:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            recon = model(batch)
+            loss = loss_fn(recon, batch)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            n_batches += 1
+        scheduler.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(val_normed), val_normed).item()
+        if val_loss < best_val:
+            best_val = val_loss
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+        if epoch == 1 or epoch % 10 == 0 or epoch == CONV_EPOCHS:
+            logger.info(
+                "  epoch %2d/%d  train_mse=%.5f  val_mse=%.5f  best_val=%.5f",
+                epoch, CONV_EPOCHS, total_loss / max(n_batches, 1), val_loss, best_val,
+            )
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    return model
+
+
+@torch.no_grad()
+def score_clip_spectrogram(
+    model: ConvAutoencoder, spectrogram: torch.Tensor, device: torch.device
+) -> dict[str, float]:
+    """Per-clip anomaly score under several aggregations of per-pixel MSE."""
+    x = spectrogram.unsqueeze(0).to(device)  # (1, 1, T, mel_bins)
+    normed = (x - model.mean) / model.std
+    recon = model(normed)
+    mse = ((recon - normed) ** 2).squeeze(0).squeeze(0).cpu().numpy()  # (T, mel_bins)
+    flat = mse.reshape(-1)
+    return {
+        "mean": float(flat.mean()),
+        "p90": float(np.percentile(flat, 90)),
+        "p95": float(np.percentile(flat, 95)),
+        "max": float(flat.max()),
+    }
+
+
+def run(config_path: str | Path, model_type: str = "dense") -> dict:
     cfg = load_config(config_path)
     set_seed(cfg["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Device: %s | config: %s", device, config_path)
+    logger.info("Device: %s | config: %s | model: %s", device, config_path, model_type)
 
     clips = parse_mimii_clips(cfg["mimii_root"])
     by_machine = group_by_machine(clips)
@@ -205,16 +320,28 @@ def run(config_path: str | Path) -> dict:
             continue
 
         logger.info("Machine %s: %d train-normal clips, %d test clips", machine, len(train_norm), len(test_pool))
-        train_vec_list = _clip_context_vectors(
-            [c.path for c in train_norm], logmel_extractor, num_samples, device
-        )
-        train_vectors = torch.cat(train_vec_list, dim=0)
-        model = train_machine_autoencoder(train_vectors, device, cfg["seed"])
 
-        test_vec_list = _clip_context_vectors(
-            [c.path for c in test_pool], logmel_extractor, num_samples, device
-        )
-        score_dicts = [score_clip_vectors(model, v, device) for v in test_vec_list]
+        if model_type == "conv":
+            train_specs = _clip_spectrograms(
+                [c.path for c in train_norm], logmel_extractor, num_samples, device
+            )
+            model = train_machine_conv_autoencoder(train_specs, device, cfg["seed"])
+            test_specs = _clip_spectrograms(
+                [c.path for c in test_pool], logmel_extractor, num_samples, device
+            )
+            score_dicts = [score_clip_spectrogram(model, test_specs[i], device) for i in range(test_specs.shape[0])]
+        else:
+            train_vec_list = _clip_context_vectors(
+                [c.path for c in train_norm], logmel_extractor, num_samples, device
+            )
+            train_vectors = torch.cat(train_vec_list, dim=0)
+            model = train_machine_autoencoder(train_vectors, device, cfg["seed"])
+
+            test_vec_list = _clip_context_vectors(
+                [c.path for c in test_pool], logmel_extractor, num_samples, device
+            )
+            score_dicts = [score_clip_vectors(model, v, device) for v in test_vec_list]
+
         labels = _clip_labels(test_pool)
 
         per_agg_scores = {agg: np.array([d[agg] for d in score_dicts]) for agg in AGGREGATIONS}
@@ -315,21 +442,23 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     parser = argparse.ArgumentParser(description="Per-machine log-mel autoencoder anomaly detection.")
     parser.add_argument("--config", type=Path, default=Path("configs/config.yaml"))
+    parser.add_argument(
+        "--model", choices=["dense", "conv"], default="dense",
+        help="dense: flattened context-window autoencoder (original). "
+        "conv: whole-clip 2D convolutional autoencoder (preserves time-frequency structure).",
+    )
     args = parser.parse_args()
 
-    results = run(args.config)
+    results = run(args.config, model_type=args.model)
     _print_table(results)
 
     artifact_dir = Path(load_config(args.config)["artifact_dir"])
-    (artifact_dir / "autoencoder_scores.json").write_text(
-        json.dumps(results, indent=2), encoding="utf-8"
-    )
-    save_auc_plot(results, artifact_dir / "autoencoder_auc.png")
-    logger.info(
-        "Artifacts: %s, %s",
-        artifact_dir / "autoencoder_scores.json",
-        artifact_dir / "autoencoder_auc.png",
-    )
+    suffix = "" if args.model == "dense" else f"_{args.model}"
+    scores_path = artifact_dir / f"autoencoder_scores{suffix}.json"
+    plot_path = artifact_dir / f"autoencoder_auc{suffix}.png"
+    scores_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    save_auc_plot(results, plot_path)
+    logger.info("Artifacts: %s, %s", scores_path, plot_path)
 
 
 if __name__ == "__main__":
