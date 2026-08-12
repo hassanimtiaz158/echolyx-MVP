@@ -28,3 +28,8 @@ Thumbs.db
 
 # Browser partial-download artifacts
 *.crdownload
+
+# Deployment folders with their own git history — not part of this repo
+/hf-space/
+/web/node_modules/
+/web/.next/
