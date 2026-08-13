@@ -237,6 +237,94 @@ def build_splits(
     )
 
 
+def build_leave_one_group_out_splits(
+    filepaths: list[Path],
+    labels: list[int],
+    groups: list[str],
+    seed: int = 42,
+    val_frac: float = 0.15,
+) -> list[tuple[str, Split, Split, Split]]:
+    """Leave-one-group-out folds over every group that contains a Faulty clip.
+
+    A single grouped train/val/test split (``build_splits``) puts the honest
+    unseen-machine test accuracy at the mercy of which 1-2 "mixed" groups the
+    random split happened to draw into test -- with only a handful of Faulty
+    machine groups, that single draw is noisy. This instead builds one fold
+    per mixed group: that whole group is held out as the fold's test split
+    (never seen in training), and train/val are built from every remaining
+    group using the same stratified grouped logic as ``build_splits``.
+    Averaging metrics across folds gives a low-variance unseen-machine
+    accuracy estimate, and the per-fold models can be ensembled on data none
+    of them trained on (e.g. the real-world holdout set).
+
+    Returns a list of ``(held_out_group_name, train, val, test)`` tuples, one
+    per mixed group, in sorted group-name order (reproducible fold order).
+    """
+    if len(filepaths) != len(labels) or len(filepaths) != len(groups):
+        raise ValueError("filepaths, labels and groups must have equal length")
+
+    by_group: dict[str, list[tuple[Path, int]]] = {}
+    for fp, lbl, g in zip(filepaths, labels, groups):
+        by_group.setdefault(g, []).append((fp, lbl))
+
+    mixed_groups = sorted(
+        g for g, items in by_group.items() if len({lbl for _, lbl in items}) > 1
+    )
+    if not mixed_groups:
+        raise ValueError(
+            "no group contains both classes -- cannot build leave-one-group-out folds"
+        )
+
+    folds: list[tuple[str, Split, Split, Split]] = []
+    for held_out in mixed_groups:
+        test_files = [fp for fp, _ in by_group[held_out]]
+        test_labels = [lbl for _, lbl in by_group[held_out]]
+
+        remaining = [g for g in by_group if g != held_out]
+        strat = [
+            "mixed"
+            if len({lbl for _, lbl in by_group[g]}) > 1
+            else f"single-{next(lbl for _, lbl in by_group[g])}"
+            for g in remaining
+        ]
+        n_strat = len(set(strat))
+        val_count = max(int(round(val_frac * len(remaining))), n_strat)
+        if val_count >= len(remaining):
+            raise ValueError(
+                f"val_frac={val_frac} too large for {len(remaining)} remaining groups "
+                f"(held out {held_out!r})"
+            )
+
+        idx = list(range(len(remaining)))
+        strat_counts = Counter(strat)
+        # sklearn's stratify requires >=2 groups per stratum; with few mixed
+        # groups a fold can leave only 1 remaining (e.g. 2 mixed groups total,
+        # one held out). Fall back to an unstratified split rather than crash
+        # -- val composition is less controlled in that rare case, but the
+        # fold still runs.
+        can_stratify = min(strat_counts.values()) >= 2
+        train_idx, val_idx = train_test_split(
+            idx, test_size=val_count,
+            stratify=strat if can_stratify else None,
+            random_state=seed, shuffle=True,
+        )
+
+        def _materialize(group_idx: list[int]) -> Split:
+            files: list[Path] = []
+            lbls: list[int] = []
+            for gi in group_idx:
+                for fp, lbl in by_group[remaining[gi]]:
+                    files.append(fp)
+                    lbls.append(lbl)
+            return Split(files, lbls)
+
+        folds.append(
+            (held_out, _materialize(train_idx), _materialize(val_idx), Split(test_files, test_labels))
+        )
+
+    return folds
+
+
 def get_class_weights(labels: list[int]) -> torch.Tensor:
     """Weight per class = total / (2 * class_count) (TDD sec 3.4).
 
